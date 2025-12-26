@@ -14,4 +14,7 @@ class Config:
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     ENV = os.getenv("ENV", "development")
 
+    # Paper Trading
+    PAPER_INITIAL_BALANCE = float(os.getenv("PAPER_INITIAL_BALANCE", "10000.0"))
+
 config = Config()
