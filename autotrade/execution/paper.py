@@ -20,7 +20,7 @@ class PaperExecutionEngine(ExecutionEngine):
         self.balance = {base_currency: initial_balance}
         self.positions = {}  # e.g., {'BTC': 0.5}
 
-    def place_order(self, symbol: str, side: str, order_type: str, amount: float, price: Optional[float] = None) -> Order:
+    def place_order(self, symbol: str, side: str, order_type: str, amount: float, price: Optional[float] = None, stop_loss: Optional[float] = None, take_profit: Optional[float] = None) -> Order:
         """
         Executes a paper trade.
         """
@@ -66,6 +66,8 @@ class PaperExecutionEngine(ExecutionEngine):
             type=order_type,
             amount=amount,
             price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
             status='closed', # Instant fill
             timestamp=datetime.now()
         )
