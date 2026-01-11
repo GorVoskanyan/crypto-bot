@@ -13,6 +13,8 @@ class Order(BaseModel):
     type: str  # 'market' or 'limit'
     amount: float
     price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
     status: str  # 'open', 'closed', 'canceled'
     timestamp: datetime
 
@@ -22,7 +24,7 @@ class ExecutionEngine(ABC):
     """
 
     @abstractmethod
-    def place_order(self, symbol: str, side: str, order_type: str, amount: float, price: Optional[float] = None) -> Order:
+    def place_order(self, symbol: str, side: str, order_type: str, amount: float, price: Optional[float] = None, stop_loss: Optional[float] = None, take_profit: Optional[float] = None) -> Order:
         """
         Places an order.
 
@@ -32,6 +34,8 @@ class ExecutionEngine(ABC):
             order_type (str): 'market' or 'limit'.
             amount (float): The amount to trade (in base currency).
             price (float, optional): The price for limit orders.
+            stop_loss (float, optional): Stop loss price.
+            take_profit (float, optional): Take profit price.
 
         Returns:
             Order: The created order object.

@@ -22,6 +22,7 @@ def main():
     symbol = 'BTC/USDT'
 
     # 2. Create Bot
+    # Note: RiskManager is initialized inside TradingBot using config
     bot = TradingBot(data_fetcher, strategy, execution_engine, symbol, timeframe='1h')
 
     # 3. Run a few iterations

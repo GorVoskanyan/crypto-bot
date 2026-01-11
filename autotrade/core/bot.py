@@ -4,6 +4,7 @@ from typing import Optional
 from autotrade.data.base import DataFetcher
 from autotrade.strategies.base import Strategy
 from autotrade.execution.base import ExecutionEngine
+from autotrade.risk.manager import RiskManager
 from autotrade.config import config
 
 logging.basicConfig(level=config.LOG_LEVEL)
@@ -18,6 +19,7 @@ class TradingBot:
         self.data_fetcher = data_fetcher
         self.strategy = strategy
         self.execution_engine = execution_engine
+        self.risk_manager = RiskManager()
         self.symbol = symbol
         self.timeframe = timeframe
         self.is_running = False
@@ -50,27 +52,38 @@ class TradingBot:
         action = signal.get('action')
 
         if action == 'buy':
-            # Simple logic: Buy with 10% of available USDT balance
-            # Real logic would be in a RiskManager module
             try:
                 balance = self.execution_engine.get_balance()
-                # Assuming USDT for now as quote currency
-                quote_currency = self.symbol.split('/')[1]
-                available_cash = balance.get(quote_currency, 0)
+                price = signal.get('price')
 
-                if available_cash > 0:
-                    amount_to_spend = available_cash * 0.10
-                    price = signal.get('price')
+                if not price:
+                    logger.warning("Signal 'buy' missing price")
+                    return
 
-                    if price:
-                         amount_to_buy = amount_to_spend / price
-                         # Filter small dust?
-                         self.execution_engine.place_order(self.symbol, 'buy', 'market', amount_to_buy, price=price)
-                         logger.info(f"Executed BUY for {amount_to_buy} {self.symbol}")
-                    else:
-                        logger.warning("Signal 'buy' missing price")
-                else:
-                    logger.warning("Insufficient funds to buy")
+                # Risk Management Checks
+                if not self.risk_manager.check_trade_permission(signal, balance, self.symbol):
+                    logger.warning("Risk Manager blocked trade permission")
+                    return
+
+                amount_to_buy = self.risk_manager.calculate_quantity(signal, balance, self.symbol)
+
+                if amount_to_buy <= 0:
+                    logger.warning("Risk Manager calculated zero quantity (insufficient funds or too high risk)")
+                    return
+
+                sl_price, tp_price = self.risk_manager.get_exit_prices(price, 'buy')
+
+                # Execute
+                self.execution_engine.place_order(
+                    self.symbol,
+                    'buy',
+                    'market',
+                    amount_to_buy,
+                    price=price,
+                    stop_loss=sl_price,
+                    take_profit=tp_price
+                )
+                logger.info(f"Executed BUY for {amount_to_buy} {self.symbol} @ {price}. SL: {sl_price}, TP: {tp_price}")
 
             except Exception as e:
                 logger.error(f"Execution failed: {e}")
