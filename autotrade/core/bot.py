@@ -5,6 +5,7 @@ from autotrade.data.base import DataFetcher
 from autotrade.strategies.base import Strategy
 from autotrade.execution.base import ExecutionEngine
 from autotrade.risk.manager import RiskManager
+from autotrade.notifications.telegram import TelegramNotificationProvider
 from autotrade.config import config
 
 logging.basicConfig(level=config.LOG_LEVEL)
@@ -24,6 +25,17 @@ class TradingBot:
         self.timeframe = timeframe
         self.is_running = False
 
+        # Initialize Notifier
+        self.notifier = None
+        if config.TELEGRAM_TOKEN and config.TELEGRAM_CHAT_ID:
+            self.notifier = TelegramNotificationProvider(config.TELEGRAM_TOKEN, config.TELEGRAM_CHAT_ID)
+            self._notify(f"Bot started for {symbol}")
+
+    def _notify(self, message: str):
+        """Helper to send notifications safely."""
+        if self.notifier:
+            self.notifier.send(message)
+
     def run_iteration(self):
         """
         Runs one iteration of the trading loop.
@@ -37,7 +49,9 @@ class TradingBot:
             data = self.data_fetcher.fetch_ohlcv(self.symbol, self.timeframe, limit=100)
             logger.debug(f"Fetched {len(data)} candles")
         except Exception as e:
-            logger.error(f"Failed to fetch data: {e}")
+            msg = f"Failed to fetch data: {e}"
+            logger.error(msg)
+            self._notify(f"⚠️ Error: {msg}")
             return
 
         # 2. Analyze
@@ -83,10 +97,14 @@ class TradingBot:
                     stop_loss=sl_price,
                     take_profit=tp_price
                 )
-                logger.info(f"Executed BUY for {amount_to_buy} {self.symbol} @ {price}. SL: {sl_price}, TP: {tp_price}")
+                msg = f"🚀 BUY {amount_to_buy:.4f} {self.symbol} @ {price}\nSL: {sl_price}\nTP: {tp_price}"
+                logger.info(msg.replace('\n', ' '))
+                self._notify(msg)
 
             except Exception as e:
-                logger.error(f"Execution failed: {e}")
+                msg = f"Execution failed: {e}"
+                logger.error(msg)
+                self._notify(f"⚠️ Error: {msg}")
 
         elif action == 'sell':
              # Simple logic: Sell all holdings of the base asset
@@ -98,12 +116,16 @@ class TradingBot:
                 if available_asset > 0:
                      price = signal.get('price')
                      self.execution_engine.place_order(self.symbol, 'sell', 'market', available_asset, price=price)
-                     logger.info(f"Executed SELL for {available_asset} {self.symbol}")
+                     msg = f"📉 SELL {available_asset:.4f} {self.symbol} @ {price}"
+                     logger.info(msg)
+                     self._notify(msg)
                 else:
                     logger.info("No assets to sell")
 
             except Exception as e:
-                logger.error(f"Execution failed: {e}")
+                msg = f"Execution failed: {e}"
+                logger.error(msg)
+                self._notify(f"⚠️ Error: {msg}")
 
         elif action == 'hold':
             pass
