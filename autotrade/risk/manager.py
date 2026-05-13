@@ -33,21 +33,9 @@ class RiskManager:
 
         return True
 
-    def calculate_quantity(self, signal: Dict, balance: Dict[str, float], symbol: str) -> float:
+    def calculate_quantity(self, signal: Dict, balance: Dict[str, float], symbol: str, leverage: int = 1) -> float:
         """
-        Calculates the safe quantity to trade based on risk per trade.
-
-        Formula:
-        Risk Amount = Account Balance * Risk Per Trade %
-        Price Distance to Stop Loss = Entry Price * Stop Loss %
-        Quantity = Risk Amount / Price Distance
-
-        Example:
-        Balance $10,000. Risk 1% = $100.
-        Price $50,000. SL 2%. Distance = $1,000.
-        Quantity = 100 / 1000 = 0.1 BTC.
-
-        Check: 0.1 BTC * $1000 drop = $100 loss. Correct.
+        Calculates the safe quantity to trade based on risk per trade for futures.
         """
         entry_price = signal.get('price')
         if not entry_price or entry_price <= 0:
@@ -56,21 +44,50 @@ class RiskManager:
         quote_currency = symbol.split('/')[1]
         account_balance = balance.get(quote_currency, 0)
 
-        # Calculate max risk amount in dollars
+        # Risk amount in quote currency
         risk_amount = account_balance * self.risk_per_trade
 
-        # Calculate price distance to stop loss
-        price_distance = entry_price * self.stop_loss_pct
+        # SL percentage from signal or config
+        sl_pct = signal.get('sl_pct', self.stop_loss_pct)
+
+        price_distance = entry_price * sl_pct
 
         if price_distance == 0:
             return 0.0
 
+        # Quantity based on risk management: (Balance * Risk%) / SL_Distance
         quantity = risk_amount / price_distance
 
-        # Cap quantity at available balance (cannot spend more than we have)
-        max_affordable_quantity = account_balance / entry_price
+        # In futures, max quantity is (balance * leverage) / entry_price
+        max_leverage_quantity = (account_balance * leverage) / entry_price
 
-        return min(quantity, max_affordable_quantity)
+        return min(quantity, max_leverage_quantity)
+
+    def calculate_dynamic_leverage(self, entry_price: float, stop_loss_price: float) -> int:
+        """
+        Calculates required leverage to sustain the stop loss while respecting risk.
+        If SL is 2%, 1/0.02 = 50x is the liquidation leverage. We want to be safer.
+        """
+        if entry_price == 0 or entry_price == stop_loss_price:
+            return 1
+
+        sl_dist_pct = abs(entry_price - stop_loss_price) / entry_price
+
+        # We want our liquidation price to be BEYOND our stop loss.
+        # Approx Liquidation % = 1 / Leverage
+        # So Leverage < 1 / SL_dist_pct
+        # We apply a safety factor (e.g., 0.8)
+        recommended_leverage = int(0.8 / sl_dist_pct)
+        return max(1, min(recommended_leverage, 20)) # Cap at 20x for safety
+
+    def estimate_liquidation_price(self, entry_price: float, leverage: int, side: str, isolated: bool = True) -> float:
+        """
+        Simple estimation of liquidation price.
+        """
+        if side == 'buy':
+            return entry_price * (1 - (1 / leverage) + 0.005) # 0.5% buffer
+        else:
+            return entry_price * (1 + (1 / leverage) - 0.005)
 
     def get_exit_prices(self, entry_price: float, signal_type: str) -> Tuple[Optional[float], Optional[float]]:
         """
