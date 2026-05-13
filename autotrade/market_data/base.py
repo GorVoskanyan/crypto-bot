@@ -14,3 +14,7 @@ class StreamListener(ABC):
     @abstractmethod
     async def on_orderbook(self, symbol: str, orderbook: dict):
         pass
+
+    @abstractmethod
+    async def on_user_data(self, data: dict):
+        pass

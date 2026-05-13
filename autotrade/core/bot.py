@@ -35,17 +35,26 @@ class TradingBot(StreamListener):
 
     async def initialize(self):
         logger.info(f"Initializing bot for {self.symbol}...")
-        # Load historical data
-        self.ohlcv_data = await self.streamer.fetch_ohlcv(self.symbol, self.timeframe, limit=100)
-
-        # Set margin mode to ISOLATED
         try:
-            await self.engine.set_margin_mode(self.symbol, 'ISOLATED')
-        except Exception as e:
-            logger.warning(f"Could not set margin mode: {e}")
+            # Load historical data
+            self.ohlcv_data = await self.streamer.fetch_ohlcv(self.symbol, self.timeframe, limit=100)
 
-        self.streamer.add_listener(self)
-        logger.info("Initialization complete.")
+            # Set margin mode to ISOLATED
+            try:
+                await self.engine.set_margin_mode(self.symbol, 'ISOLATED')
+            except Exception as e:
+                if "code=-2015" in str(e):
+                    logger.error("❌ CRITICAL: API Key Permissions Error (Code -2015).")
+                    logger.error("   Please ensure 'Enable Futures' is checked in your Binance API settings.")
+                    logger.error("   Also, verify if you are using Mainnet keys on Testnet (or vice versa).")
+                    raise e
+                logger.warning(f"Could not set margin mode: {e}")
+
+            self.streamer.add_listener(self)
+            logger.info("✅ Initialization complete.")
+        except Exception as e:
+            logger.error(f"💥 Initialization FAILED: {e}")
+            raise e
 
     async def on_candle(self, symbol: str, timeframe: str, candle: dict):
         if symbol != self.symbol or timeframe != self.timeframe:
@@ -62,6 +71,18 @@ class TradingBot(StreamListener):
         else:
             # Update last row with real-time price
             logger.debug(f"Tick: {candle['close']}")
+
+    async def on_user_data(self, data: dict):
+        event_type = data.get('e')
+        if event_type == 'ACCOUNT_UPDATE':
+            logger.info("💰 Account updated (Balance/Position change)")
+        elif event_type == 'ORDER_TRADE_UPDATE':
+            trade = data['o']
+            if trade['X'] == 'FILLED':
+                logger.info(f"✅ Order FILLED: {trade['S']} {trade['q']} @ {trade['p']}")
+                self.in_position = trade['S'] == 'BUY' or trade['S'] == 'SELL'
+            elif trade['X'] == 'CANCELED':
+                 logger.info(f"❌ Order CANCELED: {trade['S']} {trade['i']}")
 
     async def on_orderbook(self, symbol: str, orderbook: dict):
         if symbol != self.symbol:
@@ -156,5 +177,6 @@ class TradingBot(StreamListener):
         await self.initialize()
         await asyncio.gather(
             self.streamer.start_kline_socket(self.symbol, self.timeframe),
-            self.streamer.start_orderbook_socket(self.symbol)
+            self.streamer.start_orderbook_socket(self.symbol),
+            self.streamer.start_user_socket()
         )
