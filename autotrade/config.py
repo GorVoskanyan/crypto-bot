@@ -13,7 +13,7 @@ class Config:
     SECRET = os.getenv("EXCHANGE_SECRET")
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     ENV = os.getenv("ENV", "development")
-    USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
+    USE_TESTNET = os.getenv("USE_TESTNET", "false").lower() == "true"
 
     # Risk Management
     RISK_PERCENT_PER_TRADE = float(os.getenv("RISK_PERCENT_PER_TRADE", "0.01"))  # 1% risk per trade

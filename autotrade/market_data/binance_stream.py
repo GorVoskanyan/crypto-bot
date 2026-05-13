@@ -73,7 +73,7 @@ class BinanceFuturesStreamer(DataFetcher):
             await self.connect()
 
         binance_symbol = symbol.replace('/', '')
-        socket = self.bsm.depth_futures_socket(symbol=binance_symbol)
+        socket = self.bsm.futures_depth_socket(symbol=binance_symbol)
 
         async with socket as stream:
             while True:
