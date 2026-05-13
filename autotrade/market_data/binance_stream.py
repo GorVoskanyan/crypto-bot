@@ -20,6 +20,32 @@ class BinanceFuturesStreamer(DataFetcher):
         self.client = await AsyncClient.create(self.api_key, self.api_secret, testnet=self.testnet)
         self.bsm = BinanceSocketManager(self.client)
 
+    async def _keep_alive_listen_key(self, listen_key: str):
+        while True:
+            await asyncio.sleep(1800) # 30 mins
+            try:
+                await self.client.futures_stream_keepalive(listenKey=listen_key)
+                logger.info("Listen Key kept alive")
+            except Exception as e:
+                logger.error(f"Failed to keep alive listen key: {e}")
+
+    async def start_user_socket(self):
+        if not self.bsm:
+            await self.connect()
+
+        listen_key = await self.client.futures_stream_get_listen_key()
+        socket = self.bsm.futures_user_socket()
+
+        # Start keep-alive task
+        asyncio.create_task(self._keep_alive_listen_key(listen_key))
+
+        async with socket as stream:
+            while True:
+                msg = await stream.recv()
+                if msg:
+                    for listener in self.listeners:
+                        await listener.on_user_data(msg)
+
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
         if not self.client:
             await self.connect()
