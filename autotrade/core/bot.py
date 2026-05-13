@@ -72,11 +72,8 @@ class TradingBot(StreamListener):
             self.ohlcv_data = pd.concat([self.ohlcv_data, new_row], ignore_index=True).iloc[-100:]
             logger.info(f"🆕 Candle Closed: {candle['close']} | Vol: {candle['volume']}")
 
-            # Re-analyze on closed candle
-            await self.process_strategy()
-        else:
-            # Update last row with real-time price
-            logger.debug(f"Tick: {candle['close']}")
+        # In scalping, we analyze every tick for faster entry
+        await self.process_strategy()
 
     async def on_user_data(self, data: dict):
         event_type = data.get('e')
@@ -99,8 +96,9 @@ class TradingBot(StreamListener):
         best_ask = orderbook['asks'][0][0]
         spread = best_ask - best_bid
 
-        if int(orderbook['timestamp']) % 10000 < 100: # Log every ~10 seconds to avoid spam
-            logger.info(f"📊 Market: {best_bid} / {best_ask} | Spread: {spread:.2f}")
+        # Log market status every 5 seconds (approx)
+        if int(orderbook['timestamp']) % 5000 < 100:
+            logger.info(f"📊 {self.symbol} | Bid: {best_bid} | Ask: {best_ask} | Spread: {spread:.2f}")
 
     async def process_strategy(self):
         # 1. Monitor Open Positions (PnL)
@@ -112,7 +110,9 @@ class TradingBot(StreamListener):
             if active_pos:
                 self.in_position = True
                 pnl = active_pos['unrealized_pnl']
-                logger.info(f"💰 Position: {active_pos['amount']} @ {active_pos['entry_price']} | Unrealized PnL: {pnl:.2f} USDT")
+                # Log PnL occasionally
+                if asyncio.get_event_loop().time() % 10 < 0.5:
+                    logger.info(f"💰 Position: {active_pos['amount']} @ {active_pos['entry_price']} | Unrealized PnL: {pnl:.2f} USDT")
                 return
             else:
                 if self.in_position:
@@ -129,8 +129,10 @@ class TradingBot(StreamListener):
             logger.info(f"🎯 Strategy Signal: {action.upper()} @ {signal['price']}")
             await self.execute_trade(signal)
         else:
-            reason = signal.get('reason', 'no signal')
-            logger.info(f"💤 Analysis: {reason}")
+            # Only log "no signal" every 30 seconds to keep console clean but informative
+            if asyncio.get_event_loop().time() % 30 < 0.5:
+                reason = signal.get('reason', 'no signal')
+                logger.info(f"💤 Monitoring... {self.symbol} @ {self.ohlcv_data.iloc[-1]['close'] if not self.ohlcv_data.empty else ''} | {reason}")
 
     async def execute_trade(self, signal: Dict[str, Any]):
         action = signal['action']

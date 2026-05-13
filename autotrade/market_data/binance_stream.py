@@ -33,6 +33,7 @@ class BinanceFuturesStreamer(DataFetcher):
         if not self.bsm:
             await self.connect()
 
+        logger.info("📡 Starting User Data stream...")
         listen_key = await self.client.futures_stream_get_listen_key()
         socket = self.bsm.futures_user_socket()
 
@@ -75,6 +76,7 @@ class BinanceFuturesStreamer(DataFetcher):
             await self.connect()
 
         binance_symbol = symbol.replace('/', '')
+        logger.info(f"📡 Starting Kline stream for {symbol}...")
         socket = self.bsm.kline_futures_socket(symbol=binance_symbol, interval=timeframe)
 
         async with socket as stream:
@@ -99,6 +101,7 @@ class BinanceFuturesStreamer(DataFetcher):
             await self.connect()
 
         binance_symbol = symbol.replace('/', '')
+        logger.info(f"📡 Starting Orderbook stream for {symbol}...")
         socket = self.bsm.futures_depth_socket(symbol=binance_symbol)
 
         async with socket as stream:
