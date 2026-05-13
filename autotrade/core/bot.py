@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import pandas as pd
 from autotrade.market_data.binance_stream import BinanceFuturesStreamer
 from autotrade.market_data.base import StreamListener
@@ -34,26 +34,32 @@ class TradingBot(StreamListener):
             self.notifier.send(message)
 
     async def initialize(self):
-        logger.info(f"Initializing bot for {self.symbol}...")
+        logger.info(f"🚀 Initializing bot for {self.symbol}...")
         try:
-            # Load historical data
+            # 1. Load historical data
+            logger.info("📡 Fetching historical OHLCV data...")
             self.ohlcv_data = await self.streamer.fetch_ohlcv(self.symbol, self.timeframe, limit=100)
 
-            # Set margin mode to ISOLATED
+            # 2. Set margin mode and check permissions
+            logger.info("⚙️ Setting Margin Mode to ISOLATED...")
             try:
                 await self.engine.set_margin_mode(self.symbol, 'ISOLATED')
+                logger.info("✅ Margin Mode set to ISOLATED.")
             except Exception as e:
                 if "code=-2015" in str(e):
-                    logger.error("❌ CRITICAL: API Key Permissions Error (Code -2015).")
-                    logger.error("   Please ensure 'Enable Futures' is checked in your Binance API settings.")
-                    logger.error("   Also, verify if you are using Mainnet keys on Testnet (or vice versa).")
+                    logger.error("❌ CRITICAL ERROR: API Key Permissions (Code -2015)")
+                    logger.error("   Your API key is valid but does NOT have 'Enable Futures' permission.")
+                    logger.error("   Please go to Binance API Management and check the 'Enable Futures' box.")
+                    logger.error(f"   Context: Attempted to set margin mode for {self.symbol}")
                     raise e
-                logger.warning(f"Could not set margin mode: {e}")
+                logger.warning(f"⚠️ Could not set margin mode (might be already set): {e}")
 
+            # 3. Connect listener
             self.streamer.add_listener(self)
-            logger.info("✅ Initialization complete.")
+            logger.info("🏁 Initialization complete. Starting real-time streams...")
+
         except Exception as e:
-            logger.error(f"💥 Initialization FAILED: {e}")
+            logger.error(f"💥 FATAL ERROR during initialization: {e}")
             raise e
 
     async def on_candle(self, symbol: str, timeframe: str, candle: dict):
@@ -98,19 +104,22 @@ class TradingBot(StreamListener):
 
     async def process_strategy(self):
         # 1. Monitor Open Positions (PnL)
-        positions = await self.engine.get_positions()
-        symbol_no_slash = self.symbol.replace('/', '')
-        active_pos = next((p for p in positions if p['symbol'] == symbol_no_slash), None)
+        try:
+            positions = await self.engine.get_positions()
+            symbol_no_slash = self.symbol.replace('/', '')
+            active_pos = next((p for p in positions if p['symbol'] == symbol_no_slash), None)
 
-        if active_pos:
-            self.in_position = True
-            pnl = active_pos['unrealized_pnl']
-            logger.info(f"💰 Position: {active_pos['amount']} @ {active_pos['entry_price']} | Unrealized PnL: {pnl:.2f} USDT")
-            return
-        else:
-            if self.in_position:
-                logger.info("ℹ️ Position closed.")
-                self.in_position = False
+            if active_pos:
+                self.in_position = True
+                pnl = active_pos['unrealized_pnl']
+                logger.info(f"💰 Position: {active_pos['amount']} @ {active_pos['entry_price']} | Unrealized PnL: {pnl:.2f} USDT")
+                return
+            else:
+                if self.in_position:
+                    logger.info("ℹ️ Position closed.")
+                    self.in_position = False
+        except Exception as e:
+            logger.error(f"Error checking positions: {e}")
 
         # 2. Strategy Analysis
         signal = await self.strategy.analyze(self.ohlcv_data, self.current_orderbook)
@@ -128,34 +137,37 @@ class TradingBot(StreamListener):
         price = signal['price']
 
         # 1. Check funding rate
-        funding_rate = await self.engine.get_funding_rate(self.symbol)
-        if (action == 'buy' and funding_rate > 0.001) or (action == 'sell' and funding_rate < -0.001):
-            logger.warning(f"Skipping trade due to high funding rate: {funding_rate}")
-            return
+        try:
+            funding_rate = await self.engine.get_funding_rate(self.symbol)
+            if (action == 'buy' and funding_rate > 0.001) or (action == 'sell' and funding_rate < -0.001):
+                logger.warning(f"Skipping trade due to high funding rate: {funding_rate}")
+                return
+        except Exception as e:
+            logger.warning(f"Could not fetch funding rate: {e}")
 
         # 2. Risk Management
-        balance = await self.engine.get_balance()
-        quote_currency = self.symbol.split('/')[1]
-
-        if balance.get(quote_currency, 0) < 10: # Min $10
-            logger.warning("Insufficient balance")
-            return
-
-        sl_pct = signal.get('sl_pct', config.STOP_LOSS_PCT)
-        tp_pct = signal.get('tp_pct', config.TAKE_PROFIT_PCT)
-
-        sl_price = price * (1 - sl_pct) if action == 'buy' else price * (1 + sl_pct)
-        tp_price = price * (1 + tp_pct) if action == 'buy' else price * (1 - tp_pct)
-
-        leverage = self.risk_manager.calculate_dynamic_leverage(price, sl_price)
-        amount = self.risk_manager.calculate_quantity(signal, balance, self.symbol, leverage)
-
-        if amount <= 0:
-            logger.warning("Calculated amount is 0")
-            return
-
-        # 3. Execution
         try:
+            balance = await self.engine.get_balance()
+            quote_currency = self.symbol.split('/')[1]
+
+            if balance.get(quote_currency, 0) < 10: # Min $10
+                logger.warning("Insufficient balance")
+                return
+
+            sl_pct = signal.get('sl_pct', config.STOP_LOSS_PCT)
+            tp_pct = signal.get('tp_pct', config.TAKE_PROFIT_PCT)
+
+            sl_price = price * (1 - sl_pct) if action == 'buy' else price * (1 + sl_pct)
+            tp_price = price * (1 + tp_pct) if action == 'buy' else price * (1 - tp_pct)
+
+            leverage = self.risk_manager.calculate_dynamic_leverage(price, sl_price)
+            amount = self.risk_manager.calculate_quantity(signal, balance, self.symbol, leverage)
+
+            if amount <= 0:
+                logger.warning("Calculated amount is 0")
+                return
+
+            # 3. Execution
             order = await self.engine.place_order(
                 symbol=self.symbol,
                 side=action,

@@ -54,7 +54,7 @@ class ExecutionEngine(ABC):
         pass
 
     @abstractmethod
-    async def get_positions(self) -> Dict[str, Any]:
+    async def get_positions(self) -> List[Dict[str, Any]]:
         """
         Returns current open positions.
         """
