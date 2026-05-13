@@ -2,8 +2,8 @@ import asyncio
 import logging
 from typing import Optional, Dict, Any
 import pandas as pd
-from autotrade.data.binance_stream import BinanceFuturesStreamer
-from autotrade.data.base import StreamListener
+from autotrade.market_data.binance_stream import BinanceFuturesStreamer
+from autotrade.market_data.base import StreamListener
 from autotrade.strategies.base import Strategy
 from autotrade.execution.binance_futures import BinanceFuturesEngine
 from autotrade.risk.manager import RiskManager
