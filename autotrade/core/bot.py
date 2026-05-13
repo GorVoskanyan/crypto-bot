@@ -1,143 +1,142 @@
-import time
+import asyncio
 import logging
-from typing import Optional
-from autotrade.data.base import DataFetcher
+from typing import Optional, Dict, Any
+import pandas as pd
+from autotrade.data.binance_stream import BinanceFuturesStreamer
+from autotrade.data.base import StreamListener
 from autotrade.strategies.base import Strategy
-from autotrade.execution.base import ExecutionEngine
+from autotrade.execution.binance_futures import BinanceFuturesEngine
 from autotrade.risk.manager import RiskManager
 from autotrade.notifications.telegram import TelegramNotificationProvider
 from autotrade.config import config
 
-logging.basicConfig(level=config.LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
-class TradingBot:
-    """
-    The main orchestrator class.
-    """
-
-    def __init__(self, data_fetcher: DataFetcher, strategy: Strategy, execution_engine: ExecutionEngine, symbol: str, timeframe: str = '1h'):
-        self.data_fetcher = data_fetcher
+class TradingBot(StreamListener):
+    def __init__(self, streamer: BinanceFuturesStreamer, strategy: Strategy, engine: BinanceFuturesEngine, symbol: str, timeframe: str = '1m'):
+        self.streamer = streamer
         self.strategy = strategy
-        self.execution_engine = execution_engine
+        self.engine = engine
         self.risk_manager = RiskManager()
         self.symbol = symbol
         self.timeframe = timeframe
-        self.is_running = False
 
-        # Initialize Notifier
+        self.ohlcv_data: pd.DataFrame = pd.DataFrame()
+        self.current_orderbook: Dict[str, Any] = {}
+        self.in_position = False
+
         self.notifier = None
         if config.TELEGRAM_TOKEN and config.TELEGRAM_CHAT_ID:
             self.notifier = TelegramNotificationProvider(config.TELEGRAM_TOKEN, config.TELEGRAM_CHAT_ID)
-            self._notify(f"Bot started for {symbol}")
 
     def _notify(self, message: str):
-        """Helper to send notifications safely."""
         if self.notifier:
             self.notifier.send(message)
 
-    def run_iteration(self):
-        """
-        Runs one iteration of the trading loop.
-        """
-        logger.info(f"--- Starting iteration for {self.symbol} ---")
+    async def initialize(self):
+        logger.info(f"Initializing bot for {self.symbol}...")
+        # Load historical data
+        self.ohlcv_data = await self.streamer.fetch_ohlcv(self.symbol, self.timeframe, limit=100)
 
-        # 1. Fetch Data
+        # Set margin mode to ISOLATED
         try:
-            # Fetch enough data for the strategy (e.g., long window + buffer)
-            # Hardcoded limit for now, ideally strategy defines its requirement
-            data = self.data_fetcher.fetch_ohlcv(self.symbol, self.timeframe, limit=100)
-            logger.debug(f"Fetched {len(data)} candles")
+            await self.engine.set_margin_mode(self.symbol, 'ISOLATED')
         except Exception as e:
-            msg = f"Failed to fetch data: {e}"
-            logger.error(msg)
-            self._notify(f"⚠️ Error: {msg}")
+            logger.warning(f"Could not set margin mode: {e}")
+
+        self.streamer.add_listener(self)
+        logger.info("Initialization complete.")
+
+    async def on_candle(self, symbol: str, timeframe: str, candle: dict):
+        if symbol != self.symbol or timeframe != self.timeframe:
             return
 
-        # 2. Analyze
-        try:
-            signal = self.strategy.analyze(data)
-            logger.info(f"Signal: {signal}")
-        except Exception as e:
-            logger.error(f"Strategy analysis failed: {e}")
+        if candle['is_closed']:
+            # Append new closed candle
+            new_row = pd.DataFrame([candle])
+            self.ohlcv_data = pd.concat([self.ohlcv_data, new_row], ignore_index=True).iloc[-100:]
+            logger.debug(f"New candle for {self.symbol}")
+
+            # Re-analyze on closed candle or every tick? For scalping, maybe every tick.
+            # But indicators like RSI are usually better on closed candles.
+            await self.process_strategy()
+
+    async def on_orderbook(self, symbol: str, orderbook: dict):
+        if symbol != self.symbol:
+            return
+        self.current_orderbook = orderbook
+        # For ultra-fast scalping, we could call process_strategy here too.
+        # But let's start with candle-based for stability.
+
+    async def process_strategy(self):
+        if self.in_position:
+            # Check if we should exit? Or let SL/TP handle it.
+            # For now, let SL/TP handle exits.
+            # Check positions to see if we are still in trade
+            positions = await self.engine.get_positions()
+            if not any(p['symbol'] == self.symbol.replace('/', '') for p in positions):
+                self.in_position = False
             return
 
-        # 3. Execute
+        signal = await self.strategy.analyze(self.ohlcv_data, self.current_orderbook)
         action = signal.get('action')
 
-        if action == 'buy':
-            try:
-                balance = self.execution_engine.get_balance()
-                price = signal.get('price')
+        if action in ['buy', 'sell']:
+            await self.execute_trade(signal)
 
-                if not price:
-                    logger.warning("Signal 'buy' missing price")
-                    return
+    async def execute_trade(self, signal: Dict[str, Any]):
+        action = signal['action']
+        price = signal['price']
 
-                # Risk Management Checks
-                if not self.risk_manager.check_trade_permission(signal, balance, self.symbol):
-                    logger.warning("Risk Manager blocked trade permission")
-                    return
+        # 1. Check funding rate
+        funding_rate = await self.engine.get_funding_rate(self.symbol)
+        if (action == 'buy' and funding_rate > 0.001) or (action == 'sell' and funding_rate < -0.001):
+            logger.warning(f"Skipping trade due to high funding rate: {funding_rate}")
+            return
 
-                amount_to_buy = self.risk_manager.calculate_quantity(signal, balance, self.symbol)
+        # 2. Risk Management
+        balance = await self.engine.get_balance()
+        quote_currency = self.symbol.split('/')[1]
 
-                if amount_to_buy <= 0:
-                    logger.warning("Risk Manager calculated zero quantity (insufficient funds or too high risk)")
-                    return
+        if balance.get(quote_currency, 0) < 10: # Min $10
+            logger.warning("Insufficient balance")
+            return
 
-                sl_price, tp_price = self.risk_manager.get_exit_prices(price, 'buy')
+        sl_pct = signal.get('sl_pct', config.STOP_LOSS_PCT)
+        tp_pct = signal.get('tp_pct', config.TAKE_PROFIT_PCT)
 
-                # Execute
-                self.execution_engine.place_order(
-                    self.symbol,
-                    'buy',
-                    'market',
-                    amount_to_buy,
-                    price=price,
-                    stop_loss=sl_price,
-                    take_profit=tp_price
-                )
-                msg = f"🚀 BUY {amount_to_buy:.4f} {self.symbol} @ {price}\nSL: {sl_price}\nTP: {tp_price}"
-                logger.info(msg.replace('\n', ' '))
-                self._notify(msg)
+        sl_price = price * (1 - sl_pct) if action == 'buy' else price * (1 + sl_pct)
+        tp_price = price * (1 + tp_pct) if action == 'buy' else price * (1 - tp_pct)
 
-            except Exception as e:
-                msg = f"Execution failed: {e}"
-                logger.error(msg)
-                self._notify(f"⚠️ Error: {msg}")
+        leverage = self.risk_manager.calculate_dynamic_leverage(price, sl_price)
+        amount = self.risk_manager.calculate_quantity(signal, balance, self.symbol, leverage)
 
-        elif action == 'sell':
-             # Simple logic: Sell all holdings of the base asset
-            try:
-                base_currency = self.symbol.split('/')[0]
-                positions = self.execution_engine.get_positions()
-                available_asset = positions.get(base_currency, 0)
+        if amount <= 0:
+            logger.warning("Calculated amount is 0")
+            return
 
-                if available_asset > 0:
-                     price = signal.get('price')
-                     self.execution_engine.place_order(self.symbol, 'sell', 'market', available_asset, price=price)
-                     msg = f"📉 SELL {available_asset:.4f} {self.symbol} @ {price}"
-                     logger.info(msg)
-                     self._notify(msg)
-                else:
-                    logger.info("No assets to sell")
+        # 3. Execution
+        try:
+            order = await self.engine.place_order(
+                symbol=self.symbol,
+                side=action,
+                order_type='MARKET',
+                amount=amount,
+                stop_loss=sl_price,
+                take_profit=tp_price,
+                leverage=leverage
+            )
+            self.in_position = True
+            msg = f"🚀 {action.upper()} {amount} {self.symbol} @ {price}\nLev: {leverage}x, SL: {sl_price:.2f}, TP: {tp_price:.2f}"
+            logger.info(msg)
+            self._notify(msg)
+        except Exception as e:
+            logger.error(f"Trade execution failed: {e}")
+            self._notify(f"❌ Error: {e}")
 
-            except Exception as e:
-                msg = f"Execution failed: {e}"
-                logger.error(msg)
-                self._notify(f"⚠️ Error: {msg}")
-
-        elif action == 'hold':
-            pass
-
-        else:
-            logger.warning(f"Unknown action: {action}")
-
-    def run(self, interval: int = 60):
-        """
-        Runs the bot loop indefinitely.
-        """
-        self.is_running = True
-        while self.is_running:
-            self.run_iteration()
-            time.sleep(interval)
+    async def run(self):
+        await self.initialize()
+        await asyncio.gather(
+            self.streamer.start_kline_socket(self.symbol, self.timeframe),
+            self.streamer.start_orderbook_socket(self.symbol)
+        )

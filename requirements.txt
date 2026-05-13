@@ -6,3 +6,6 @@ pydantic
 pytest
 matplotlib
 requests
+python-binance
+aiodns
+websockets

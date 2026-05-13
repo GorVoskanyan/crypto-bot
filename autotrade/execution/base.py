@@ -24,7 +24,7 @@ class ExecutionEngine(ABC):
     """
 
     @abstractmethod
-    def place_order(self, symbol: str, side: str, order_type: str, amount: float, price: Optional[float] = None, stop_loss: Optional[float] = None, take_profit: Optional[float] = None) -> Order:
+    async def place_order(self, symbol: str, side: str, order_type: str, amount: float, price: Optional[float] = None, stop_loss: Optional[float] = None, take_profit: Optional[float] = None, leverage: int = 1) -> Order:
         """
         Places an order.
 
@@ -36,6 +36,7 @@ class ExecutionEngine(ABC):
             price (float, optional): The price for limit orders.
             stop_loss (float, optional): Stop loss price.
             take_profit (float, optional): Take profit price.
+            leverage (int): Leverage to use.
 
         Returns:
             Order: The created order object.
@@ -43,7 +44,7 @@ class ExecutionEngine(ABC):
         pass
 
     @abstractmethod
-    def get_balance(self) -> Dict[str, float]:
+    async def get_balance(self) -> Dict[str, float]:
         """
         Returns the current account balance.
 
@@ -53,8 +54,22 @@ class ExecutionEngine(ABC):
         pass
 
     @abstractmethod
-    def get_positions(self) -> Dict[str, float]:
+    async def get_positions(self) -> Dict[str, Any]:
         """
         Returns current open positions.
+        """
+        pass
+
+    @abstractmethod
+    async def set_leverage(self, symbol: str, leverage: int):
+        """
+        Sets leverage for a symbol.
+        """
+        pass
+
+    @abstractmethod
+    async def set_margin_mode(self, symbol: str, margin_mode: str):
+        """
+        Sets margin mode (ISOLATED or CROSS).
         """
         pass

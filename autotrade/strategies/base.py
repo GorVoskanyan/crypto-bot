@@ -8,12 +8,13 @@ class Strategy(ABC):
     """
 
     @abstractmethod
-    def analyze(self, data: pd.DataFrame) -> Dict[str, Any]:
+    async def analyze(self, data: pd.DataFrame, orderbook: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Analyzes market data to generate trading signals.
 
         Args:
             data (pd.DataFrame): OHLCV data.
+            orderbook (Dict[str, Any], optional): Real-time orderbook data.
 
         Returns:
             Dict[str, Any]: A dictionary containing the signal.
