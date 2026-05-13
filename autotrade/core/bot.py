@@ -55,34 +55,52 @@ class TradingBot(StreamListener):
             # Append new closed candle
             new_row = pd.DataFrame([candle])
             self.ohlcv_data = pd.concat([self.ohlcv_data, new_row], ignore_index=True).iloc[-100:]
-            logger.debug(f"New candle for {self.symbol}")
+            logger.info(f"🆕 Candle Closed: {candle['close']} | Vol: {candle['volume']}")
 
-            # Re-analyze on closed candle or every tick? For scalping, maybe every tick.
-            # But indicators like RSI are usually better on closed candles.
+            # Re-analyze on closed candle
             await self.process_strategy()
+        else:
+            # Update last row with real-time price
+            logger.debug(f"Tick: {candle['close']}")
 
     async def on_orderbook(self, symbol: str, orderbook: dict):
         if symbol != self.symbol:
             return
         self.current_orderbook = orderbook
-        # For ultra-fast scalping, we could call process_strategy here too.
-        # But let's start with candle-based for stability.
+
+        best_bid = orderbook['bids'][0][0]
+        best_ask = orderbook['asks'][0][0]
+        spread = best_ask - best_bid
+
+        if int(orderbook['timestamp']) % 10000 < 100: # Log every ~10 seconds to avoid spam
+            logger.info(f"📊 Market: {best_bid} / {best_ask} | Spread: {spread:.2f}")
 
     async def process_strategy(self):
-        if self.in_position:
-            # Check if we should exit? Or let SL/TP handle it.
-            # For now, let SL/TP handle exits.
-            # Check positions to see if we are still in trade
-            positions = await self.engine.get_positions()
-            if not any(p['symbol'] == self.symbol.replace('/', '') for p in positions):
-                self.in_position = False
-            return
+        # 1. Monitor Open Positions (PnL)
+        positions = await self.engine.get_positions()
+        symbol_no_slash = self.symbol.replace('/', '')
+        active_pos = next((p for p in positions if p['symbol'] == symbol_no_slash), None)
 
+        if active_pos:
+            self.in_position = True
+            pnl = active_pos['unrealized_pnl']
+            logger.info(f"💰 Position: {active_pos['amount']} @ {active_pos['entry_price']} | Unrealized PnL: {pnl:.2f} USDT")
+            return
+        else:
+            if self.in_position:
+                logger.info("ℹ️ Position closed.")
+                self.in_position = False
+
+        # 2. Strategy Analysis
         signal = await self.strategy.analyze(self.ohlcv_data, self.current_orderbook)
         action = signal.get('action')
 
         if action in ['buy', 'sell']:
+            logger.info(f"🎯 Strategy Signal: {action.upper()} @ {signal['price']}")
             await self.execute_trade(signal)
+        else:
+            reason = signal.get('reason', 'no signal')
+            logger.info(f"💤 Analysis: {reason}")
 
     async def execute_trade(self, signal: Dict[str, Any]):
         action = signal['action']
