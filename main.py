@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from autotrade.core.bot import TradingBot
-from autotrade.data.binance_stream import BinanceFuturesStreamer
+from autotrade.market_data.binance_stream import BinanceFuturesStreamer
 from autotrade.strategies.scalping_strategy import ScalpingStrategy
 from autotrade.execution.binance_futures import BinanceFuturesEngine
 from autotrade.config import config
