@@ -78,14 +78,23 @@ class BinanceFuturesStreamer(DataFetcher):
         async with socket as stream:
             while True:
                 msg = await stream.recv()
-                if msg:
-                    orderbook = {
-                        'bids': [[float(p), float(q)] for p, q in msg['b']],
-                        'asks': [[float(p), float(q)] for p, q in msg['a']],
-                        'timestamp': msg['E']
-                    }
-                    for listener in self.listeners:
-                        await listener.on_orderbook(symbol, orderbook)
+                if not msg:
+                    continue
+
+                # Handle both raw Binance and normalized python-binance formats
+                bids = msg.get('b') or msg.get('bids')
+                asks = msg.get('a') or msg.get('asks')
+
+                if bids is None or asks is None:
+                    continue
+
+                orderbook = {
+                    'bids': [[float(p), float(q)] for p, q in bids],
+                    'asks': [[float(p), float(q)] for p, q in asks],
+                    'timestamp': msg.get('E', msg.get('T', 0))
+                }
+                for listener in self.listeners:
+                    await listener.on_orderbook(symbol, orderbook)
 
     async def close(self):
         if self.client:
