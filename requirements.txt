@@ -4,6 +4,7 @@ pandas_ta
 python-dotenv
 pydantic
 pytest
+pytest-asyncio
 matplotlib
 requests
 python-binance
