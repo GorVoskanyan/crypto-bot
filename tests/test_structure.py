@@ -13,7 +13,7 @@ def test_submodules_exist():
     """Test that all submodules exist and can be imported."""
     submodules = [
         "autotrade.core",
-        "autotrade.data",
+        "autotrade.market_data",
         "autotrade.strategies",
         "autotrade.execution",
         "autotrade.risk",
