@@ -8,6 +8,9 @@ import random
 from datetime import datetime
 from autotrade.strategies.sma_crossover import SMACrossoverStrategy
 from autotrade.strategies.scalping_strategy import ScalpingStrategy
+from autotrade.strategies.confluence_strategy import ConfluenceStrategy
+from autotrade.strategies.ema_trend_strategy import EMATrendStrategy
+from autotrade.strategies.adaptive_selector import AdaptiveStrategySelector
 
 def generate_mock_data(symbol: str, timeframe: str, limit: int = 500) -> pd.DataFrame:
     """
@@ -18,25 +21,23 @@ def generate_mock_data(symbol: str, timeframe: str, limit: int = 500) -> pd.Data
     base_price = 50000.0 if "BTC" in symbol else 3000.0 if "ETH" in symbol else 100.0
     prices = [base_price]
 
-    # Generate random walk with drift (some overall trend)
-    drift = 0.00005
-    volatility = 0.0015
+    drift = 0.0001
+    volatility = 0.002
 
     for _ in range(limit - 1):
         change = prices[-1] * (drift + volatility * np.random.randn())
         prices.append(max(prices[-1] + change, 0.01))
 
-    dates = pd.date_range(end=datetime.now(), periods=limit, freq='1min')
+    dates = pd.date_range(end=datetime.now(), periods=limit, freq='5min')
 
     df = pd.DataFrame(index=dates)
     df['open'] = prices
-    df['high'] = [p * (1 + abs(np.random.randn()) * 0.0005) for p in prices]
-    df['low'] = [p * (1 - abs(np.random.randn()) * 0.0005) for p in prices]
+    df['high'] = [p * (1 + abs(np.random.randn()) * 0.001) for p in prices]
+    df['low'] = [p * (1 - abs(np.random.randn()) * 0.001) for p in prices]
     df['close'] = [random.uniform(l, h) for l, h in zip(df['low'], df['high'])]
-    df['volume'] = [random.uniform(10, 100) for _ in range(limit)]
+    df['volume'] = [random.uniform(100, 1000) for _ in range(limit)]
     df['timestamp'] = df.index.astype(np.int64) // 10**6
 
-    # Clean high/low relationship
     df['high'] = df[['open', 'close', 'high']].max(axis=1)
     df['low'] = df[['open', 'close', 'low']].min(axis=1)
 
@@ -66,9 +67,19 @@ async def run_backtest(strategy_name: str, symbol: str, timeframe: str, limit: i
     df = await fetch_historical_data(symbol, timeframe, limit)
 
     # 2. Instantiate strategy
-    if strategy_name.lower() == 'sma':
+    s_name = strategy_name.lower()
+    if s_name == 'sma':
         print("📈 Selected Strategy: Simple Moving Average (SMA) Crossover")
         strategy = SMACrossoverStrategy(short_window=5, long_window=20)
+    elif s_name == 'confluence':
+        print("🧠 Selected Strategy: High-Probability Confluence (Bollinger + RSI + MACD + Vol)")
+        strategy = ConfluenceStrategy()
+    elif s_name == 'ema_trend':
+        print("📈 Selected Strategy: EMA Trend Ribbon + ADX Filter")
+        strategy = EMATrendStrategy()
+    elif s_name == 'adaptive':
+        print("🤖 Selected Strategy: Adaptive Strategy Selector (Automatic Regime Detection)")
+        strategy = AdaptiveStrategySelector()
     else:
         print("⚡ Selected Strategy: High-Frequency Scalping Strategy")
         strategy = ScalpingStrategy(rsi_period=14, rsi_overbought=70, rsi_oversold=30, atr_period=14)
@@ -81,15 +92,16 @@ async def run_backtest(strategy_name: str, symbol: str, timeframe: str, limit: i
     position_amount = 0.0
     sl_price = 0.0
     tp_price = 0.0
-    leverage = 10 # standard leverage
+    leverage = 10
     fee_rate = 0.0004 # 0.04% futures fee
 
     trades = []
     equity_curve = [initial_balance]
 
-    # Start simulating candles
-    # We need enough history to calculate indicators, so we start loop from 30
-    for i in range(30, len(df)):
+    # Warmup length
+    warmup = 60 if len(df) >= 100 else 30
+
+    for i in range(warmup, len(df)):
         current_data = df.iloc[:i+1].copy()
         row = current_data.iloc[-1]
         current_price = row['close']
@@ -100,7 +112,6 @@ async def run_backtest(strategy_name: str, symbol: str, timeframe: str, limit: i
             exit_price = current_price
             exit_reason = "Signal"
 
-            # Check Stop Loss / Take Profit hits
             if position == 'long':
                 if row['low'] <= sl_price:
                     exit_price = sl_price
@@ -121,17 +132,14 @@ async def run_backtest(strategy_name: str, symbol: str, timeframe: str, limit: i
                     closed = True
 
             if closed:
-                # Calculate PnL
                 entry_value = entry_price * position_amount
                 exit_value = exit_price * position_amount
 
-                # Buy low, sell high for long; sell high, buy low for short
                 if position == 'long':
                     pnl = exit_value - entry_value
                 else:
                     pnl = entry_value - exit_value
 
-                # Subtract fees
                 entry_fee = entry_value * fee_rate
                 exit_fee = exit_value * fee_rate
                 total_fees = entry_fee + exit_fee
@@ -141,7 +149,7 @@ async def run_backtest(strategy_name: str, symbol: str, timeframe: str, limit: i
 
                 trades.append({
                     'type': position.upper(),
-                    'entry_time': current_data.index[-1], # placeholder
+                    'entry_time': current_data.index[-1],
                     'entry_price': entry_price,
                     'exit_price': exit_price,
                     'net_pnl': net_pnl,
@@ -154,14 +162,10 @@ async def run_backtest(strategy_name: str, symbol: str, timeframe: str, limit: i
                 position = None
                 position_amount = 0.0
 
-        # If no active position, look for entry signals
+        # If no active position, analyze entry
         if not position:
-            # For ScalpingStrategy, simulate random yet slightly biased orderbook imbalance to confirm entries
             orderbook = None
-            if strategy_name.lower() == 'scalping':
-                # Generate high-imbalance orderbook to simulate ticks
-                # If close > open (bullish), bid volume is larger
-                # If close < open (bearish), ask volume is larger
+            if s_name == 'scalping':
                 bullish = row['close'] >= row['open']
                 bids_qty = 50.0 if bullish else 10.0
                 asks_qty = 10.0 if bullish else 50.0
@@ -175,23 +179,19 @@ async def run_backtest(strategy_name: str, symbol: str, timeframe: str, limit: i
             action = signal.get('action')
 
             if action in ['buy', 'sell']:
-                # Risk parameters
-                sl_pct = signal.get('sl_pct', 0.02)
-                tp_pct = signal.get('tp_pct', 0.04)
+                sl_pct = signal.get('sl_pct', 0.015)
+                tp_pct = signal.get('tp_pct', 0.03)
 
                 entry_price = current_price
                 position = 'long' if action == 'buy' else 'short'
 
-                # Position sizing (1% risk)
                 risk_amount = balance * 0.01
                 sl_dist = entry_price * sl_pct
-                position_amount = risk_amount / sl_dist
+                position_amount = risk_amount / max(sl_dist, 1e-6)
 
-                # Limit size by leverage limits (80% of max margin)
                 max_leverage_amount = (balance * leverage * 0.8) / entry_price
                 position_amount = min(position_amount, max_leverage_amount)
 
-                # Stop loss and take profit values
                 if position == 'long':
                     sl_price = entry_price * (1 - sl_pct)
                     tp_price = entry_price * (1 + tp_pct)
@@ -203,7 +203,7 @@ async def run_backtest(strategy_name: str, symbol: str, timeframe: str, limit: i
 
         equity_curve.append(balance)
 
-    # --- Performance Report ---
+    # Performance Report
     print("\n" + "="*50)
     print("📊 BACKTEST PERFORMANCE REPORT (ԲԵՔԹԵՍԹԻ ՀԱՇՎԵՏՎՈՒԹՅՈՒՆ)")
     print("="*50)
@@ -218,7 +218,6 @@ async def run_backtest(strategy_name: str, symbol: str, timeframe: str, limit: i
     win_rate = (len(winning_trades) / total_trades * 100) if total_trades > 0 else 0.0
     profit_factor = (total_win / total_loss) if total_loss > 0 else float('inf')
 
-    # Calculate Max Drawdown
     equity_series = pd.Series(equity_curve)
     cum_max = equity_series.cummax()
     drawdowns = (equity_series - cum_max) / cum_max * 100
@@ -241,9 +240,9 @@ async def run_backtest(strategy_name: str, symbol: str, timeframe: str, limit: i
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AutoTrade Backtesting Engine")
-    parser.add_argument('--strategy', type=str, default='scalping', choices=['sma', 'scalping'], help="Strategy name (sma or scalping)")
+    parser.add_argument('--strategy', type=str, default='adaptive', choices=['sma', 'scalping', 'confluence', 'ema_trend', 'adaptive'], help="Strategy name")
     parser.add_argument('--symbol', type=str, default='BTC/USDT', help="Trading symbol (e.g. BTC/USDT)")
-    parser.add_argument('--timeframe', type=str, default='1m', help="Timeframe (1m, 5m, 15m, 1h, 1d)")
+    parser.add_argument('--timeframe', type=str, default='5m', help="Timeframe (1m, 5m, 15m, 1h, 1d)")
     parser.add_argument('--limit', type=type(1), default=500, help="Number of candles to load")
 
     args = parser.parse_args()

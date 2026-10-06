@@ -16,6 +16,11 @@ class Config:
     # Set to True if using Testnet keys, False for Real account
     USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
 
+    # Strategy & Pair Settings
+    TRADING_SYMBOL = os.getenv("TRADING_SYMBOL", "BTC/USDT")
+    TIMEFRAME = os.getenv("TIMEFRAME", "5m")
+    STRATEGY = os.getenv("STRATEGY", "adaptive").lower()  # adaptive, confluence, ema_trend, scalping, sma
+
     # Risk Management
     RISK_PERCENT_PER_TRADE = float(os.getenv("RISK_PERCENT_PER_TRADE", "0.01"))  # 1% risk per trade
     STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.02"))        # 2% stop loss
