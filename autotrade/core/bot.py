@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Optional, Dict, Any, List
 import pandas as pd
 from autotrade.market_data.binance_stream import BinanceFuturesStreamer
@@ -24,6 +25,13 @@ class TradingBot(StreamListener):
         self.ohlcv_data: pd.DataFrame = pd.DataFrame()
         self.current_orderbook: Dict[str, Any] = {}
         self.in_position = False
+
+        # Periodic logging and REST throttling timestamps
+        self.last_orderbook_log = 0.0
+        self.last_monitoring_log = 0.0
+        self.last_pnl_log = 0.0
+        self.last_position_check = 0.0
+        self.cached_positions = []
 
         self.notifier = None
         if config.TELEGRAM_TOKEN and config.TELEGRAM_CHAT_ID:
@@ -72,18 +80,19 @@ class TradingBot(StreamListener):
             self.ohlcv_data = pd.concat([self.ohlcv_data, new_row], ignore_index=True).iloc[-100:]
             logger.info(f"🆕 Candle Closed: {candle['close']} | Vol: {candle['volume']}")
 
-        # In scalping, we analyze every tick for faster entry
         await self.process_strategy()
 
     async def on_user_data(self, data: dict):
         event_type = data.get('e')
         if event_type == 'ACCOUNT_UPDATE':
             logger.info("💰 Account updated (Balance/Position change)")
+            self.last_position_check = 0.0  # Force instant position refresh
         elif event_type == 'ORDER_TRADE_UPDATE':
             trade = data['o']
             if trade['X'] == 'FILLED':
                 logger.info(f"✅ Order FILLED: {trade['S']} {trade['q']} @ {trade['p']}")
-                self.in_position = trade['S'] == 'BUY' or trade['S'] == 'SELL'
+                self.in_position = trade['S'] in ['BUY', 'SELL']
+                self.last_position_check = 0.0
             elif trade['X'] == 'CANCELED':
                  logger.info(f"❌ Order CANCELED: {trade['S']} {trade['i']}")
 
@@ -92,26 +101,35 @@ class TradingBot(StreamListener):
             return
         self.current_orderbook = orderbook
 
-        best_bid = orderbook['bids'][0][0]
-        best_ask = orderbook['asks'][0][0]
+        now = time.time()
+        best_bid = orderbook['bids'][0][0] if orderbook.get('bids') else 0
+        best_ask = orderbook['asks'][0][0] if orderbook.get('asks') else 0
         spread = best_ask - best_bid
 
-        # Log market status every 5 seconds (approx)
-        if int(orderbook['timestamp']) % 5000 < 100:
+        # Log market status reliably every 10 seconds
+        if now - self.last_orderbook_log >= 10.0:
+            self.last_orderbook_log = now
             logger.info(f"📊 {self.symbol} | Bid: {best_bid} | Ask: {best_ask} | Spread: {spread:.2f}")
 
+        await self.process_strategy()
+
     async def process_strategy(self):
-        # 1. Monitor Open Positions (PnL)
+        now = time.time()
+
+        # 1. Monitor Open Positions (PnL) - Throttled REST API call (every 5 seconds)
         try:
-            positions = await self.engine.get_positions()
+            if now - self.last_position_check >= 5.0:
+                self.last_position_check = now
+                self.cached_positions = await self.engine.get_positions()
+
             symbol_no_slash = self.symbol.replace('/', '')
-            active_pos = next((p for p in positions if p['symbol'] == symbol_no_slash), None)
+            active_pos = next((p for p in self.cached_positions if p['symbol'] == symbol_no_slash), None)
 
             if active_pos:
                 self.in_position = True
                 pnl = active_pos['unrealized_pnl']
-                # Log PnL occasionally
-                if asyncio.get_event_loop().time() % 10 < 0.5:
+                if now - self.last_pnl_log >= 10.0:
+                    self.last_pnl_log = now
                     logger.info(f"💰 Position: {active_pos['amount']} @ {active_pos['entry_price']} | Unrealized PnL: {pnl:.2f} USDT")
                 return
             else:
@@ -129,10 +147,12 @@ class TradingBot(StreamListener):
             logger.info(f"🎯 Strategy Signal: {action.upper()} @ {signal['price']}")
             await self.execute_trade(signal)
         else:
-            # Only log "no signal" every 30 seconds to keep console clean but informative
-            if asyncio.get_event_loop().time() % 30 < 0.5:
-                reason = signal.get('reason', 'no signal')
-                logger.info(f"💤 Monitoring... {self.symbol} @ {self.ohlcv_data.iloc[-1]['close'] if not self.ohlcv_data.empty else ''} | {reason}")
+            # Log monitoring status every 15 seconds reliably
+            if now - self.last_monitoring_log >= 15.0:
+                self.last_monitoring_log = now
+                reason = signal.get('reason', 'no entry signal')
+                last_price = self.ohlcv_data.iloc[-1]['close'] if not self.ohlcv_data.empty else 'N/A'
+                logger.info(f"💤 Monitoring {self.symbol} @ {last_price} | {reason}")
 
     async def execute_trade(self, signal: Dict[str, Any]):
         action = signal['action']
@@ -180,6 +200,7 @@ class TradingBot(StreamListener):
                 leverage=leverage
             )
             self.in_position = True
+            self.last_position_check = 0.0  # Reset position timer to update immediately
             msg = f"🚀 {action.upper()} {amount} {self.symbol} @ {price}\nLev: {leverage}x, SL: {sl_price:.2f}, TP: {tp_price:.2f}"
             logger.info(msg)
             self._notify(msg)
@@ -187,10 +208,17 @@ class TradingBot(StreamListener):
             logger.error(f"Trade execution failed: {e}")
             self._notify(f"❌ Error: {e}")
 
+    async def _heartbeat_loop(self):
+        """Guarantees periodic console activity every 15s even if WebSocket ticks are quiet."""
+        while True:
+            await asyncio.sleep(15)
+            await self.process_strategy()
+
     async def run(self):
         await self.initialize()
         await asyncio.gather(
             self.streamer.start_kline_socket(self.symbol, self.timeframe),
             self.streamer.start_orderbook_socket(self.symbol),
-            self.streamer.start_user_socket()
+            self.streamer.start_user_socket(),
+            self._heartbeat_loop()
         )
