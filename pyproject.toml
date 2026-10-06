@@ -1,0 +1,29 @@
+[project]
+name = "autotrade-jules"
+version = "0.2.0"
+description = "Algorithmic Trading Bot for Binance Futures with Adaptive Strategy Engine"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ccxt>=4.0.0",
+    "pandas>=2.0.0",
+    "pandas_ta>=0.3.14b0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "matplotlib>=3.8.0",
+    "websockets>=12.0",
+    "python-binance>=1.0.19",
+    "aiodns>=3.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
