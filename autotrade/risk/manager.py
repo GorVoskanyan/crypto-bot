@@ -1,10 +1,12 @@
 import math
+import time
+from datetime import datetime, timezone
 from typing import Dict, Any, Tuple
 
 class RiskManager:
     """
     Handles position sizing, leverage calculation, Stop-Loss / Take-Profit logic,
-    Break-Even activation, and Trailing Stop updates.
+    Break-Even activation, Trailing Stop updates, and Daily Drawdown circuit breaker.
     """
 
     def __init__(
@@ -14,7 +16,8 @@ class RiskManager:
         breakeven_trigger_pct: float = 0.01,   # Activate Break-Even at +1% profit
         trailing_stop_pct: float = 0.008,      # Trail Stop-Loss by 0.8% behind peak price
         stop_loss_pct: float = 0.02,
-        take_profit_pct: float = 0.04
+        take_profit_pct: float = 0.04,
+        max_daily_drawdown_pct: float = 0.03   # 3% max daily drawdown limit
     ):
         self.risk_percent_per_trade = risk_percent_per_trade
         self.max_leverage = max_leverage
@@ -22,10 +25,49 @@ class RiskManager:
         self.trailing_stop_pct = trailing_stop_pct
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
+        self.max_daily_drawdown_pct = max_daily_drawdown_pct
+
+        # Daily Drawdown Circuit Breaker Tracking
+        self.current_day_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        self.day_start_balance = 0.0
+        self.daily_pnl = 0.0
+        self.circuit_breaker_tripped = False
+
+    def reset_daily_stats_if_new_day(self, current_total_balance: float):
+        """Resets daily starting balance and circuit breaker when a new UTC day begins."""
+        today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        if today_str != self.current_day_str or self.day_start_balance == 0.0:
+            self.current_day_str = today_str
+            self.day_start_balance = current_total_balance
+            self.daily_pnl = 0.0
+            self.circuit_breaker_tripped = False
+
+    def update_daily_pnl(self, realized_pnl: float, current_total_balance: float):
+        """Updates realized daily PnL and checks if daily drawdown threshold is breached."""
+        self.reset_daily_stats_if_new_day(current_total_balance)
+        self.daily_pnl += realized_pnl
+
+        if self.day_start_balance > 0:
+            drawdown_pct = (self.day_start_balance - current_total_balance) / self.day_start_balance
+            if drawdown_pct >= self.max_daily_drawdown_pct:
+                self.circuit_breaker_tripped = True
+
+    def is_circuit_breaker_active(self, current_total_balance: float) -> bool:
+        """Returns True if daily drawdown threshold has been hit."""
+        self.reset_daily_stats_if_new_day(current_total_balance)
+        if self.day_start_balance > 0:
+            drawdown_pct = (self.day_start_balance - current_total_balance) / self.day_start_balance
+            if drawdown_pct >= self.max_daily_drawdown_pct:
+                self.circuit_breaker_tripped = True
+        return self.circuit_breaker_tripped
 
     def check_trade_permission(self, signal: Dict[str, Any], balance: Dict[str, float], symbol: str) -> bool:
         quote_currency = symbol.split('/')[1] if '/' in symbol else 'USDT'
         available = balance.get(quote_currency, 0.0)
+
+        if self.is_circuit_breaker_active(available):
+            return False
+
         return available > 10.0 and signal.get('action') in ['buy', 'sell']
 
     def get_exit_prices(self, entry_price: float, side: str) -> Tuple[float, float]:
@@ -39,13 +81,10 @@ class RiskManager:
         return sl, tp
 
     def calculate_quantity(self, signal: Dict[str, Any], balance: Dict[str, float], symbol: str, leverage: int = 1) -> float:
-        """
-        Calculates position quantity based on risk percent and stop loss distance.
-        """
         quote_currency = symbol.split('/')[1] if '/' in symbol else 'USDT'
         available_balance = balance.get(quote_currency, 0.0)
 
-        if available_balance <= 0:
+        if available_balance <= 0 or self.is_circuit_breaker_active(available_balance):
             return 0.0
 
         price = signal['price']
@@ -66,9 +105,6 @@ class RiskManager:
         return min(quantity, max_quantity)
 
     def calculate_dynamic_leverage(self, entry_price: float, sl_price: float) -> int:
-        """
-        Calculates dynamic leverage based on stop loss distance.
-        """
         sl_dist_pct = abs(entry_price - sl_price) / entry_price
         if sl_dist_pct <= 0:
             return 1
@@ -85,15 +121,11 @@ class RiskManager:
         lowest_price: float,
         current_sl_price: float
     ) -> Dict[str, Any]:
-        """
-        Evaluates current position price to determine if Break-Even or Trailing Stop should update the SL price.
-        """
         side_upper = side.upper()
         if side_upper in ['BUY', 'LONG']:
             price_gain_pct = (current_price - entry_price) / entry_price
             peak_gain_pct = (highest_price - entry_price) / entry_price
 
-            # 1. Break-Even Check
             if price_gain_pct >= self.breakeven_trigger_pct and current_sl_price < entry_price:
                 return {
                     'update_sl': True,
@@ -101,7 +133,6 @@ class RiskManager:
                     'reason': 'Break-Even activated'
                 }
 
-            # 2. Trailing Stop Check
             if peak_gain_pct >= self.breakeven_trigger_pct:
                 trailed_sl = highest_price * (1 - self.trailing_stop_pct)
                 if trailed_sl > current_sl_price:
@@ -115,7 +146,6 @@ class RiskManager:
             price_gain_pct = (entry_price - current_price) / entry_price
             peak_gain_pct = (entry_price - lowest_price) / entry_price
 
-            # 1. Break-Even Check
             if price_gain_pct >= self.breakeven_trigger_pct and current_sl_price > entry_price:
                 return {
                     'update_sl': True,
@@ -123,7 +153,6 @@ class RiskManager:
                     'reason': 'Break-Even activated'
                 }
 
-            # 2. Trailing Stop Check
             if peak_gain_pct >= self.breakeven_trigger_pct:
                 trailed_sl = lowest_price * (1 + self.trailing_stop_pct)
                 if trailed_sl < current_sl_price:

@@ -19,7 +19,7 @@ class SymbolContext:
         self.ohlcv_data: pd.DataFrame = pd.DataFrame()
         self.current_orderbook: Dict[str, Any] = {}
         self.in_position = False
-        self.position_side = None # 'BUY' or 'SELL'
+        self.position_side = None
         self.entry_price = 0.0
         self.highest_price = 0.0
         self.lowest_price = float('inf')
@@ -45,20 +45,103 @@ class MultiSymbolTradingBot(StreamListener):
         self.symbols = symbols
         self.timeframe = timeframe
 
-        # Map symbol -> SymbolContext and Strategy instance
         self.contexts: Dict[str, SymbolContext] = {s: SymbolContext(s) for s in symbols}
         self.strategies: Dict[str, Strategy] = {s: strategy_factory() for s in symbols}
 
         self.last_position_check = 0.0
         self.cached_positions = []
 
+        self.last_balance_check = 0.0
+        self.cached_balances: Dict[str, float] = {}
+
         self.notifier = None
         if config.TELEGRAM_TOKEN and config.TELEGRAM_CHAT_ID:
             self.notifier = TelegramNotificationProvider(config.TELEGRAM_TOKEN, config.TELEGRAM_CHAT_ID)
+            self._setup_telegram_commands()
 
     def _notify(self, message: str):
         if self.notifier:
             self.notifier.send(message)
+
+    def _setup_telegram_commands(self):
+        """Registers interactive commands on Telegram Provider."""
+        if not self.notifier:
+            return
+
+        self.notifier.register_command('/status', self._cmd_status)
+        self.notifier.register_command('/balance', self._cmd_balance)
+        self.notifier.register_command('/closeall', self._cmd_closeall)
+        self.notifier.register_command('/topcoins', self._cmd_topcoins)
+        self.notifier.register_command('/help', self._cmd_help)
+        self.notifier.start_command_listener()
+
+    async def _cmd_status(self) -> str:
+        """Returns live bot status, active symbols, open positions & PnL."""
+        msg = f"📊 *AutoTrade Bot Status*\n"
+        msg += f"• *Symbols:* {', '.join(self.symbols)}\n"
+        msg += f"• *Timeframe:* {self.timeframe}\n"
+        msg += f"• *Circuit Breaker:* {'🔴 TRIPPED' if self.risk_manager.circuit_breaker_tripped else '🟢 OK'}\n\n"
+
+        positions = await self.engine.get_positions()
+        if not positions:
+            msg += "• *Open Positions:* None\n"
+        else:
+            msg += f"• *Active Positions ({len(positions)}):*\n"
+            for p in positions:
+                msg += f"  - `{p['symbol']}`: {p['amount']} @ {p['entry_price']} | PnL: {p['unrealized_pnl']:.2f} USDT\n"
+
+        return msg
+
+    async def _cmd_balance(self) -> str:
+        """Returns current exchange balance."""
+        try:
+            balances = await self.engine.get_balance()
+            self.cached_balances = balances
+            self.last_balance_check = time.time()
+            msg = "💰 *Account Balances*\n"
+            for asset, bal in balances.items():
+                msg += f"• *{asset}:* {bal:.2f}\n"
+            return msg
+        except Exception as e:
+            return f"❌ Error fetching balance: {e}"
+
+    async def _cmd_closeall(self) -> str:
+        """Emergency command to close all active open positions."""
+        msg = "🚨 *Emergency Close All Initiated*\n"
+        try:
+            positions = await self.engine.get_positions()
+            if not positions:
+                return "ℹ️ No open positions to close."
+
+            for p in positions:
+                symbol = p['symbol']
+                amt = abs(p['amount'])
+                side = 'SELL' if p['amount'] > 0 else 'BUY'
+
+                formatted_symbol = f"{symbol[:-4]}/USDT" if symbol.endswith('USDT') else symbol
+                await self.engine.place_order(
+                    symbol=formatted_symbol,
+                    side=side,
+                    order_type='MARKET',
+                    amount=amt
+                )
+                msg += f"✅ Closed position for `{symbol}` ({amt} units)\n"
+            return msg
+        except Exception as e:
+            return f"💥 Emergency close failed: {e}"
+
+    async def _cmd_topcoins(self) -> str:
+        return f"🎯 *Active Tracked Symbols ({len(self.symbols)}):*\n" + "\n".join([f"• `{s}`" for s in self.symbols])
+
+    async def _cmd_help(self) -> str:
+        return (
+            "🤖 *AutoTrade Telegram Commands*\n"
+            "• `/status` - Live bot status, positions & PnL\n"
+            "• `/balance` - Current account balances\n"
+            "• `/topcoins` - Tracked volatile symbols\n"
+            "• `/closeall` - Emergency close all positions\n"
+            "• `/help` - Command list"
+        )
 
     async def initialize(self):
         logger.info(f"🚀 Initializing Multi-Symbol Bot for {len(self.symbols)} pairs: {', '.join(self.symbols)}...")
@@ -101,11 +184,13 @@ class MultiSymbolTradingBot(StreamListener):
         if event_type == 'ACCOUNT_UPDATE':
             logger.info("💰 Account updated (Balance/Position change)")
             self.last_position_check = 0.0
+            self.last_balance_check = 0.0
         elif event_type == 'ORDER_TRADE_UPDATE':
             trade = data['o']
             if trade['X'] == 'FILLED':
                 logger.info(f"✅ Order FILLED: {trade['s']} {trade['S']} {trade['q']} @ {trade['p']}")
                 self.last_position_check = 0.0
+                self.last_balance_check = 0.0
             elif trade['X'] == 'CANCELED':
                  logger.info(f"❌ Order CANCELED: {trade['s']} {trade['S']} {trade['i']}")
 
@@ -131,12 +216,19 @@ class MultiSymbolTradingBot(StreamListener):
         for symbol in self.symbols:
             await self.process_symbol_strategy(symbol)
 
+    async def _get_throttled_balance(self) -> Dict[str, float]:
+        """Fetches account balance with REST throttling (cached for 10s)."""
+        now = time.time()
+        if now - self.last_balance_check >= 10.0 or not self.cached_balances:
+            self.last_balance_check = now
+            self.cached_balances = await self.engine.get_balance()
+        return self.cached_balances
+
     async def process_symbol_strategy(self, symbol: str):
         now = time.time()
         ctx = self.contexts[symbol]
         strategy = self.strategies[symbol]
 
-        # Get current price from orderbook or candle close
         current_price = 0.0
         if ctx.current_orderbook and ctx.current_orderbook.get('bids'):
             current_price = ctx.current_orderbook['bids'][0][0]
@@ -159,7 +251,6 @@ class MultiSymbolTradingBot(StreamListener):
                 ctx.position_side = 'BUY' if amt > 0 else 'SELL'
                 ctx.entry_price = active_pos['entry_price']
 
-                # Update extreme prices
                 if current_price > 0:
                     ctx.highest_price = max(ctx.highest_price, current_price)
                     ctx.lowest_price = min(ctx.lowest_price, current_price)
@@ -168,7 +259,6 @@ class MultiSymbolTradingBot(StreamListener):
                     ctx.last_pnl_log = now
                     logger.info(f"💰 Position [{symbol}]: {amt} @ {ctx.entry_price} | PnL: {pnl:.2f} USDT")
 
-                # Evaluate Trailing Stop & Break-Even
                 if current_price > 0 and ctx.current_sl_price > 0:
                     trail_res = self.risk_manager.evaluate_trailing_and_breakeven(
                         side=ctx.position_side,
@@ -199,6 +289,20 @@ class MultiSymbolTradingBot(StreamListener):
         except Exception as e:
             logger.error(f"Error checking position/trailing stop for {symbol}: {e}")
 
+        # Check Circuit Breaker before strategy analysis
+        try:
+            balance = await self._get_throttled_balance()
+            quote_currency = symbol.split('/')[1]
+            tot_bal = balance.get(quote_currency, 0.0)
+
+            if self.risk_manager.is_circuit_breaker_active(tot_bal):
+                if now - ctx.last_monitoring_log >= 30.0:
+                    ctx.last_monitoring_log = now
+                    logger.warning(f"🛑 Circuit Breaker Active (Daily Drawdown Limit Hit). Trading paused for {symbol}.")
+                return
+        except Exception as e:
+            pass
+
         # 2. Strategy Analysis
         signal = await strategy.analyze(ctx.ohlcv_data, ctx.current_orderbook)
         action = signal.get('action')
@@ -219,19 +323,21 @@ class MultiSymbolTradingBot(StreamListener):
         ctx = self.contexts[symbol]
 
         try:
+            balance = await self._get_throttled_balance()
+            quote_currency = symbol.split('/')[1]
+            tot_bal = balance.get(quote_currency, 0.0)
+
+            if self.risk_manager.is_circuit_breaker_active(tot_bal):
+                logger.warning(f"Skipping trade [{symbol}] because Daily Drawdown Circuit Breaker is active.")
+                return
+
+            if tot_bal < 10:
+                logger.warning(f"Insufficient balance to execute trade for {symbol}")
+                return
+
             funding_rate = await self.engine.get_funding_rate(symbol)
             if (action == 'buy' and funding_rate > 0.001) or (action == 'sell' and funding_rate < -0.001):
                 logger.warning(f"Skipping trade [{symbol}] due to high funding rate: {funding_rate}")
-                return
-        except Exception as e:
-            logger.warning(f"Could not fetch funding rate for {symbol}: {e}")
-
-        try:
-            balance = await self.engine.get_balance()
-            quote_currency = symbol.split('/')[1]
-
-            if balance.get(quote_currency, 0) < 10:
-                logger.warning(f"Insufficient balance to execute trade for {symbol}")
                 return
 
             sl_pct = signal.get('sl_pct', config.STOP_LOSS_PCT)
@@ -263,6 +369,7 @@ class MultiSymbolTradingBot(StreamListener):
             ctx.lowest_price = price
             ctx.current_sl_price = sl_price
             self.last_position_check = 0.0
+            self.last_balance_check = 0.0
 
             msg = f"🚀 {action.upper()} {amount} {symbol} @ {price}\nLev: {leverage}x, SL: {sl_price:.2f}, TP: {tp_price:.2f}"
             logger.info(msg)

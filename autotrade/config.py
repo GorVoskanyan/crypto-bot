@@ -26,12 +26,13 @@ class Config:
     TOP_SYMBOLS_COUNT = int(os.getenv("TOP_SYMBOLS_COUNT", "3"))  # Number of volatile coins to trade concurrently
     MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "10000000.0"))  # $10M min volume filter
 
-    # Risk Management
+    # Risk Management & Protection Limits
     RISK_PERCENT_PER_TRADE = float(os.getenv("RISK_PERCENT_PER_TRADE", "0.01"))  # 1% risk per trade
     STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.02"))        # 2% stop loss
     TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "0.04"))    # 4% take profit
+    MAX_DAILY_DRAWDOWN_PCT = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT", "0.03"))  # 3% max daily drawdown limit
 
-    # Notifications
+    # Notifications & Interactive Telegram Commands
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
