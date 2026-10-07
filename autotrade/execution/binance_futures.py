@@ -91,6 +91,56 @@ class BinanceFuturesEngine(ExecutionEngine):
         precision = d - remainder
         return format(precision, 'f').rstrip('0').rstrip('.')
 
+    async def update_stop_loss(self, symbol: str, side: str, new_sl_price: float) -> bool:
+        """
+        Cancels any existing STOP_MARKET orders for the symbol and places a new one
+        at new_sl_price formatted with tickSize precision.
+        """
+        await self._ensure_client()
+        binance_symbol = symbol.replace('/', '')
+
+        try:
+            open_orders = await retry_async(
+                lambda: self.client.futures_get_open_orders(symbol=binance_symbol),
+                max_retries=3
+            )
+            for o in open_orders:
+                if o['type'] == 'STOP_MARKET':
+                    await retry_async(
+                        lambda: self.client.futures_cancel_order(symbol=binance_symbol, orderId=o['orderId']),
+                        max_retries=3
+                    )
+
+            info = await self.get_symbol_info(symbol)
+            price_filter = next(f for f in info['filters'] if f['filterType'] == 'PRICE_FILTER')
+            tick_size = price_filter['tickSize']
+            formatted_sl = self._format_value(new_sl_price, tick_size)
+
+            sl_side = 'SELL' if side.upper() in ['BUY', 'LONG'] else 'BUY'
+
+            async def _place_sl():
+                try:
+                    return await self.client.futures_create_order(
+                        symbol=binance_symbol,
+                        side=sl_side,
+                        type='STOP_MARKET',
+                        stopPrice=formatted_sl,
+                        closePosition='true'
+                    )
+                except Exception as e:
+                    err_str = str(e)
+                    if "-4509" in err_str or "-2021" in err_str:
+                        logger.warning(f"⚠️ Stop-Loss placement warning [{symbol}]: {err_str}")
+                        return None
+                    raise e
+
+            await retry_async(_place_sl, max_retries=3)
+            logger.info(f"✅ Stop-Loss updated to {formatted_sl} for {symbol}.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update Stop-Loss for {symbol}: {e}")
+            return False
+
     async def place_order(self, symbol: str, side: str, order_type: str, amount: float, price: Optional[float] = None, stop_loss: Optional[float] = None, take_profit: Optional[float] = None, leverage: int = 1) -> Order:
         await self._ensure_client()
         binance_symbol = symbol.replace('/', '')
@@ -133,33 +183,54 @@ class BinanceFuturesEngine(ExecutionEngine):
             timestamp=datetime.fromtimestamp(res['updateTime'] / 1000.0)
         )
 
+        # Allow position update to settle on exchange before submitting SL/TP
+        if stop_loss or take_profit:
+            import asyncio
+            await asyncio.sleep(0.5)
+
         if stop_loss:
             sl_side = 'SELL' if side_upper == 'BUY' else 'BUY'
             formatted_sl = self._format_value(stop_loss, tick_size)
-            await retry_async(
-                lambda: self.client.futures_create_order(
-                    symbol=binance_symbol,
-                    side=sl_side,
-                    type='STOP_MARKET',
-                    stopPrice=formatted_sl,
-                    closePosition='true'
-                ),
-                max_retries=3
-            )
+
+            async def _place_stop_loss():
+                try:
+                    return await self.client.futures_create_order(
+                        symbol=binance_symbol,
+                        side=sl_side,
+                        type='STOP_MARKET',
+                        stopPrice=formatted_sl,
+                        closePosition='true'
+                    )
+                except Exception as e:
+                    err_str = str(e)
+                    if "-4509" in err_str or "-2021" in err_str:
+                        logger.warning(f"⚠️ Stop Loss order warning for {symbol}: {err_str}")
+                        return None
+                    raise e
+
+            await retry_async(_place_stop_loss, max_retries=3)
 
         if take_profit:
             tp_side = 'SELL' if side_upper == 'BUY' else 'BUY'
             formatted_tp = self._format_value(take_profit, tick_size)
-            await retry_async(
-                lambda: self.client.futures_create_order(
-                    symbol=binance_symbol,
-                    side=tp_side,
-                    type='TAKE_PROFIT_MARKET',
-                    stopPrice=formatted_tp,
-                    closePosition='true'
-                ),
-                max_retries=3
-            )
+
+            async def _place_take_profit():
+                try:
+                    return await self.client.futures_create_order(
+                        symbol=binance_symbol,
+                        side=tp_side,
+                        type='TAKE_PROFIT_MARKET',
+                        stopPrice=formatted_tp,
+                        closePosition='true'
+                    )
+                except Exception as e:
+                    err_str = str(e)
+                    if "-4509" in err_str or "-2021" in err_str:
+                        logger.warning(f"⚠️ Take Profit order warning for {symbol}: {err_str}")
+                        return None
+                    raise e
+
+            await retry_async(_place_take_profit, max_retries=3)
 
         return order
 
