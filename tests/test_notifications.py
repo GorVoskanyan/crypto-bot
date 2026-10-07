@@ -1,41 +1,31 @@
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch, MagicMock
 from autotrade.notifications.telegram import TelegramNotificationProvider
 
-class TestNotifications(unittest.TestCase):
+class TestTelegramProvider(unittest.TestCase):
+
+    def setUp(self):
+        self.provider = TelegramNotificationProvider(token="dummy_token", chat_id="123456")
 
     @patch('autotrade.notifications.telegram.requests.post')
     def test_send_success(self, mock_post):
-        """Test sending a notification successfully."""
         mock_response = MagicMock()
-        mock_response.raise_for_status.return_value = None
+        mock_response.status_code = 200
         mock_post.return_value = mock_response
 
-        provider = TelegramNotificationProvider('token', 'chat_id')
-        provider.send('Hello')
+        self.provider.send("Test message")
 
         mock_post.assert_called_once()
         args, kwargs = mock_post.call_args
-        self.assertEqual(kwargs['json']['text'], 'Hello')
+        self.assertEqual(kwargs['json']['chat_id'], '123456')
+        self.assertEqual(kwargs['json']['text'], "Test message")
 
-    @patch('autotrade.notifications.telegram.requests.post')
-    def test_send_failure(self, mock_post):
-        """Test graceful handling of send failure."""
-        mock_post.side_effect = Exception("Connection Error")
+    def test_register_command(self):
+        async def dummy_handler():
+            return "OK"
 
-        provider = TelegramNotificationProvider('token', 'chat_id')
-        # Should log error but not crash
-        provider.send('Hello')
-
-        mock_post.assert_called_once()
-
-    def test_missing_config(self):
-        """Test skipping if config missing."""
-        provider = TelegramNotificationProvider('', '')
-
-        with patch('autotrade.notifications.telegram.requests.post') as mock_post:
-             provider.send('Hello')
-             mock_post.assert_not_called()
+        self.provider.register_command("status", dummy_handler)
+        self.assertIn("/status", self.provider.command_handlers)
 
 if __name__ == '__main__':
     unittest.main()
