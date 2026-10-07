@@ -1,11 +1,27 @@
 import asyncio
 import logging
 import pandas as pd
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from binance import AsyncClient, BinanceSocketManager
+from binance.exceptions import BinanceAPIException
 from autotrade.market_data.base import DataFetcher, StreamListener
 
 logger = logging.getLogger(__name__)
+
+async def retry_async(coro_fn: Callable, max_retries: int = 5, initial_delay: float = 2.0):
+    """Retries an async function call with exponential backoff on transient network / 502 errors."""
+    delay = initial_delay
+    for attempt in range(1, max_retries + 1):
+        try:
+            return await coro_fn()
+        except (BinanceAPIException, Exception) as e:
+            err_msg = str(e)
+            if attempt == max_retries:
+                logger.error(f"❌ Operation failed after {max_retries} attempts: {err_msg}")
+                raise e
+            logger.warning(f"⚠️ API call attempt {attempt}/{max_retries} failed ({err_msg}). Retrying in {delay:.1f}s...")
+            await asyncio.sleep(delay)
+            delay *= 2.0
 
 class BinanceFuturesStreamer(DataFetcher):
     def __init__(self, api_key: Optional[str] = None, api_secret: Optional[str] = None, testnet: bool = False):
@@ -17,8 +33,13 @@ class BinanceFuturesStreamer(DataFetcher):
         self.listeners: List[StreamListener] = []
 
     async def connect(self):
-        self.client = await AsyncClient.create(self.api_key, self.api_secret, testnet=self.testnet)
-        self.bsm = BinanceSocketManager(self.client)
+        async def _create_client():
+            client = await AsyncClient.create(self.api_key, self.api_secret, testnet=self.testnet)
+            return client
+
+        if not self.client:
+            self.client = await retry_async(_create_client, max_retries=5, initial_delay=2.0)
+            self.bsm = BinanceSocketManager(self.client)
 
     async def _keep_alive_listen_key(self, listen_key: str):
         while True:
@@ -34,7 +55,7 @@ class BinanceFuturesStreamer(DataFetcher):
             await self.connect()
 
         logger.info("📡 Starting User Data stream...")
-        listen_key = await self.client.futures_stream_get_listen_key()
+        listen_key = await retry_async(lambda: self.client.futures_stream_get_listen_key(), max_retries=5)
         socket = self.bsm.futures_user_socket()
 
         # Start keep-alive task
@@ -51,10 +72,13 @@ class BinanceFuturesStreamer(DataFetcher):
         if not self.client:
             await self.connect()
 
-        # CCXT uses 'BTC/USDT', Binance uses 'BTCUSDT'
         binance_symbol = symbol.replace('/', '')
 
-        klines = await self.client.futures_klines(symbol=binance_symbol, interval=timeframe, limit=limit)
+        klines = await retry_async(
+            lambda: self.client.futures_klines(symbol=binance_symbol, interval=timeframe, limit=limit),
+            max_retries=5,
+            initial_delay=2.0
+        )
 
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -110,7 +134,6 @@ class BinanceFuturesStreamer(DataFetcher):
                 if not msg:
                     continue
 
-                # Handle both raw Binance and normalized python-binance formats
                 bids = msg.get('b') or msg.get('bids')
                 asks = msg.get('a') or msg.get('asks')
 
