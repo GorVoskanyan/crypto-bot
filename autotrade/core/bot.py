@@ -19,6 +19,12 @@ class SymbolContext:
         self.ohlcv_data: pd.DataFrame = pd.DataFrame()
         self.current_orderbook: Dict[str, Any] = {}
         self.in_position = False
+        self.position_side = None # 'BUY' or 'SELL'
+        self.entry_price = 0.0
+        self.highest_price = 0.0
+        self.lowest_price = float('inf')
+        self.current_sl_price = 0.0
+
         self.last_orderbook_log = 0.0
         self.last_monitoring_log = 0.0
         self.last_pnl_log = 0.0
@@ -122,7 +128,6 @@ class MultiSymbolTradingBot(StreamListener):
         await self.process_symbol_strategy(symbol)
 
     async def process_strategy(self):
-        """Processes strategy for all active symbols."""
         for symbol in self.symbols:
             await self.process_symbol_strategy(symbol)
 
@@ -131,7 +136,14 @@ class MultiSymbolTradingBot(StreamListener):
         ctx = self.contexts[symbol]
         strategy = self.strategies[symbol]
 
-        # 1. Position Check
+        # Get current price from orderbook or candle close
+        current_price = 0.0
+        if ctx.current_orderbook and ctx.current_orderbook.get('bids'):
+            current_price = ctx.current_orderbook['bids'][0][0]
+        elif not ctx.ohlcv_data.empty:
+            current_price = ctx.ohlcv_data.iloc[-1]['close']
+
+        # 1. Position Monitoring & Trailing Stop / Break-Even Evaluation
         try:
             if now - self.last_position_check >= 5.0:
                 self.last_position_check = now
@@ -143,16 +155,49 @@ class MultiSymbolTradingBot(StreamListener):
             if active_pos:
                 ctx.in_position = True
                 pnl = active_pos['unrealized_pnl']
+                amt = active_pos['amount']
+                ctx.position_side = 'BUY' if amt > 0 else 'SELL'
+                ctx.entry_price = active_pos['entry_price']
+
+                # Update extreme prices
+                if current_price > 0:
+                    ctx.highest_price = max(ctx.highest_price, current_price)
+                    ctx.lowest_price = min(ctx.lowest_price, current_price)
+
                 if now - ctx.last_pnl_log >= 15.0:
                     ctx.last_pnl_log = now
-                    logger.info(f"💰 Position [{symbol}]: {active_pos['amount']} @ {active_pos['entry_price']} | PnL: {pnl:.2f} USDT")
+                    logger.info(f"💰 Position [{symbol}]: {amt} @ {ctx.entry_price} | PnL: {pnl:.2f} USDT")
+
+                # Evaluate Trailing Stop & Break-Even
+                if current_price > 0 and ctx.current_sl_price > 0:
+                    trail_res = self.risk_manager.evaluate_trailing_and_breakeven(
+                        side=ctx.position_side,
+                        entry_price=ctx.entry_price,
+                        current_price=current_price,
+                        highest_price=ctx.highest_price,
+                        lowest_price=ctx.lowest_price,
+                        current_sl_price=ctx.current_sl_price
+                    )
+
+                    if trail_res['update_sl']:
+                        new_sl = trail_res['new_sl_price']
+                        logger.info(f"🛡️ {trail_res['reason']} [{symbol}]: Updating Stop-Loss to {new_sl:.2f}")
+                        sl_updated = await self.engine.update_stop_loss(symbol, ctx.position_side, new_sl)
+                        if sl_updated:
+                            ctx.current_sl_price = new_sl
+                            self._notify(f"🛡️ [{symbol}] {trail_res['reason']}: New SL @ {new_sl:.2f}")
+
                 return
             else:
                 if ctx.in_position:
                     logger.info(f"ℹ️ Position closed [{symbol}].")
                     ctx.in_position = False
+                    ctx.entry_price = 0.0
+                    ctx.highest_price = 0.0
+                    ctx.lowest_price = float('inf')
+                    ctx.current_sl_price = 0.0
         except Exception as e:
-            logger.error(f"Error checking position for {symbol}: {e}")
+            logger.error(f"Error checking position/trailing stop for {symbol}: {e}")
 
         # 2. Strategy Analysis
         signal = await strategy.analyze(ctx.ohlcv_data, ctx.current_orderbook)
@@ -212,7 +257,13 @@ class MultiSymbolTradingBot(StreamListener):
                 leverage=leverage
             )
             ctx.in_position = True
+            ctx.position_side = action.upper()
+            ctx.entry_price = price
+            ctx.highest_price = price
+            ctx.lowest_price = price
+            ctx.current_sl_price = sl_price
             self.last_position_check = 0.0
+
             msg = f"🚀 {action.upper()} {amount} {symbol} @ {price}\nLev: {leverage}x, SL: {sl_price:.2f}, TP: {tp_price:.2f}"
             logger.info(msg)
             self._notify(msg)

@@ -1,111 +1,136 @@
-from typing import Dict, Optional, Tuple
-from autotrade.config import config
+import math
+from typing import Dict, Any, Tuple
 
 class RiskManager:
     """
-    Manages trading risk, position sizing, and trade permissions.
+    Handles position sizing, leverage calculation, Stop-Loss / Take-Profit logic,
+    Break-Even activation, and Trailing Stop updates.
     """
 
-    def __init__(self):
-        self.risk_per_trade = config.RISK_PERCENT_PER_TRADE
-        self.stop_loss_pct = config.STOP_LOSS_PCT
-        self.take_profit_pct = config.TAKE_PROFIT_PCT
+    def __init__(
+        self,
+        risk_percent_per_trade: float = 0.01,
+        max_leverage: int = 20,
+        breakeven_trigger_pct: float = 0.01,   # Activate Break-Even at +1% profit
+        trailing_stop_pct: float = 0.008,      # Trail Stop-Loss by 0.8% behind peak price
+        stop_loss_pct: float = 0.02,
+        take_profit_pct: float = 0.04
+    ):
+        self.risk_percent_per_trade = risk_percent_per_trade
+        self.max_leverage = max_leverage
+        self.breakeven_trigger_pct = breakeven_trigger_pct
+        self.trailing_stop_pct = trailing_stop_pct
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
 
-    def check_trade_permission(self, signal: Dict, balance: Dict[str, float], symbol: str) -> bool:
+    def check_trade_permission(self, signal: Dict[str, Any], balance: Dict[str, float], symbol: str) -> bool:
+        quote_currency = symbol.split('/')[1] if '/' in symbol else 'USDT'
+        available = balance.get(quote_currency, 0.0)
+        return available > 10.0 and signal.get('action') in ['buy', 'sell']
+
+    def get_exit_prices(self, entry_price: float, side: str) -> Tuple[float, float]:
+        side_upper = side.upper()
+        if side_upper in ['BUY', 'LONG']:
+            sl = entry_price * (1 - self.stop_loss_pct)
+            tp = entry_price * (1 + self.take_profit_pct)
+        else:
+            sl = entry_price * (1 + self.stop_loss_pct)
+            tp = entry_price * (1 - self.take_profit_pct)
+        return sl, tp
+
+    def calculate_quantity(self, signal: Dict[str, Any], balance: Dict[str, float], symbol: str, leverage: int = 1) -> float:
         """
-        Checks if a trade is allowed based on risk rules.
+        Calculates position quantity based on risk percent and stop loss distance.
         """
-        action = signal.get('action')
-        if action not in ['buy', 'sell']:
-            return False
+        quote_currency = symbol.split('/')[1] if '/' in symbol else 'USDT'
+        available_balance = balance.get(quote_currency, 0.0)
 
-        # Example check: Do we have enough quote currency to open a position?
-        if action == 'buy':
-            quote_currency = symbol.split('/')[1]
-            if balance.get(quote_currency, 0) <= 0:
-                return False
-
-        # Example check: Do we have asset to sell?
-        if action == 'sell':
-            base_currency = symbol.split('/')[0]
-            if balance.get(base_currency, 0) <= 0:
-                return False
-
-        return True
-
-    def calculate_quantity(self, signal: Dict, balance: Dict[str, float], symbol: str, leverage: int = 1) -> float:
-        """
-        Calculates the safe quantity to trade based on risk per trade for futures.
-        """
-        entry_price = signal.get('price')
-        if not entry_price or entry_price <= 0:
+        if available_balance <= 0:
             return 0.0
 
-        quote_currency = symbol.split('/')[1]
-        account_balance = balance.get(quote_currency, 0)
-
-        # Risk amount in quote currency
-        risk_amount = account_balance * self.risk_per_trade
-
-        # SL percentage from signal or config
+        price = signal['price']
         sl_pct = signal.get('sl_pct', self.stop_loss_pct)
 
-        price_distance = entry_price * sl_pct
+        risk_amount = available_balance * self.risk_percent_per_trade
 
-        if price_distance == 0:
+        sl_dist = price * sl_pct
+        if sl_dist <= 0:
             return 0.0
 
-        # Quantity based on risk management: (Balance * Risk%) / SL_Distance
-        quantity = risk_amount / price_distance
+        quantity = risk_amount / sl_dist
 
-        # In futures, max quantity is (balance * leverage) / entry_price
-        max_leverage_quantity = (account_balance * leverage) / entry_price
+        # Cap quantity by available balance * leverage
+        max_notional = available_balance * leverage
+        max_quantity = max_notional / price
 
-        return min(quantity, max_leverage_quantity)
+        return min(quantity, max_quantity)
 
-    def calculate_dynamic_leverage(self, entry_price: float, stop_loss_price: float) -> int:
+    def calculate_dynamic_leverage(self, entry_price: float, sl_price: float) -> int:
         """
-        Calculates required leverage to sustain the stop loss while respecting risk.
-        If SL is 2%, 1/0.02 = 50x is the liquidation leverage. We want to be safer.
+        Calculates dynamic leverage based on stop loss distance.
         """
-        if entry_price == 0 or entry_price == stop_loss_price:
+        sl_dist_pct = abs(entry_price - sl_price) / entry_price
+        if sl_dist_pct <= 0:
             return 1
 
-        sl_dist_pct = abs(entry_price - stop_loss_price) / entry_price
+        recommended_leverage = int(1 / (sl_dist_pct * 2))
+        return max(1, min(recommended_leverage, self.max_leverage))
 
-        # We want our liquidation price to be BEYOND our stop loss.
-        # Approx Liquidation % = 1 / Leverage
-        # So Leverage < 1 / SL_dist_pct
-        # We apply a safety factor (e.g., 0.8)
-        recommended_leverage = int(0.8 / sl_dist_pct)
-        return max(1, min(recommended_leverage, 20)) # Cap at 20x for safety
-
-    def estimate_liquidation_price(self, entry_price: float, leverage: int, side: str, isolated: bool = True) -> float:
+    def evaluate_trailing_and_breakeven(
+        self,
+        side: str,
+        entry_price: float,
+        current_price: float,
+        highest_price: float,
+        lowest_price: float,
+        current_sl_price: float
+    ) -> Dict[str, Any]:
         """
-        Simple estimation of liquidation price.
+        Evaluates current position price to determine if Break-Even or Trailing Stop should update the SL price.
         """
-        if side == 'buy':
-            return entry_price * (1 - (1 / leverage) + 0.005) # 0.5% buffer
-        else:
-            return entry_price * (1 + (1 / leverage) - 0.005)
+        side_upper = side.upper()
+        if side_upper in ['BUY', 'LONG']:
+            price_gain_pct = (current_price - entry_price) / entry_price
+            peak_gain_pct = (highest_price - entry_price) / entry_price
 
-    def get_exit_prices(self, entry_price: float, signal_type: str) -> Tuple[Optional[float], Optional[float]]:
-        """
-        Calculates Stop Loss and Take Profit prices.
+            # 1. Break-Even Check
+            if price_gain_pct >= self.breakeven_trigger_pct and current_sl_price < entry_price:
+                return {
+                    'update_sl': True,
+                    'new_sl_price': entry_price * 1.0005,
+                    'reason': 'Break-Even activated'
+                }
 
-        Returns: (stop_loss_price, take_profit_price)
-        """
-        if signal_type == 'buy':
-            sl_price = entry_price * (1 - self.stop_loss_pct)
-            tp_price = entry_price * (1 + self.take_profit_pct)
-            return sl_price, tp_price
+            # 2. Trailing Stop Check
+            if peak_gain_pct >= self.breakeven_trigger_pct:
+                trailed_sl = highest_price * (1 - self.trailing_stop_pct)
+                if trailed_sl > current_sl_price:
+                    return {
+                        'update_sl': True,
+                        'new_sl_price': trailed_sl,
+                        'reason': f'Trailing Stop update (peak {highest_price:.2f})'
+                    }
 
-        elif signal_type == 'sell':
-            # For short selling (future implementation), logic mirrors 'buy'
-            # But currently we only support Spot Sell (exit position).
-            # If this were a short open:
-            sl_price = entry_price * (1 + self.stop_loss_pct)
-            tp_price = entry_price * (1 - self.take_profit_pct)
-            return sl_price, tp_price
+        elif side_upper in ['SELL', 'SHORT']:
+            price_gain_pct = (entry_price - current_price) / entry_price
+            peak_gain_pct = (entry_price - lowest_price) / entry_price
 
-        return None, None
+            # 1. Break-Even Check
+            if price_gain_pct >= self.breakeven_trigger_pct and current_sl_price > entry_price:
+                return {
+                    'update_sl': True,
+                    'new_sl_price': entry_price * 0.9995,
+                    'reason': 'Break-Even activated'
+                }
+
+            # 2. Trailing Stop Check
+            if peak_gain_pct >= self.breakeven_trigger_pct:
+                trailed_sl = lowest_price * (1 + self.trailing_stop_pct)
+                if trailed_sl < current_sl_price:
+                    return {
+                        'update_sl': True,
+                        'new_sl_price': trailed_sl,
+                        'reason': f'Trailing Stop update (trough {lowest_price:.2f})'
+                    }
+
+        return {'update_sl': False, 'new_sl_price': current_sl_price, 'reason': 'No change'}

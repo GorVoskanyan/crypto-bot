@@ -1,11 +1,15 @@
 # AutoTrade-Jules: Algorithmic Trading Bot
 
 ## Project Overview
-This is a modular trading bot built in Python for Binance Futures. It automates technical analysis strategies using CCXT, WebSocket streaming, dynamic market scanning for high-volatility coins, and dynamic strategy selection (Adaptive Strategy Engine).
+This is a modular trading bot built in Python for Binance Futures. It automates technical analysis strategies using CCXT, WebSocket streaming, dynamic market scanning for high-volatility coins, adaptive strategy selection, and automated risk protection (Break-Even & Trailing Stop).
 
-## Key Features & Phase 1 Highlights
+## Key Features & Phases
 - **Dynamic Market Scanner (`MarketScanner`):** Automatically scans Binance Futures markets for the Top N USDT pairs with the highest 24h volatility range and liquid volume ($10M+ USDT volume filter).
 - **Multi-Symbol Concurrency:** Runs WebSocket streams, orderbook analytics, and strategy engines concurrently for multiple top volatile crypto pairs.
+- **Break-Even & Trailing Stop Protection:**
+  - **Break-Even:** When a position reaches +1% profit, the Stop-Loss is automatically moved to the entry price to eliminate risk.
+  - **Trailing Stop:** As price moves further in profit, the Stop-Loss dynamically trails behind peak prices by 0.8% to lock in maximum profit.
+  - **Precision Formatting:** All SL/TP orders are strictly formatted with Binance symbol `tickSize` and `stepSize` precision.
 - **Adaptive Strategy Selector (`adaptive` - Default):** Dynamically analyzes market regime (trending via ADX, volatile/ranging via Bollinger Bandwidth) for each coin and delegates execution to the optimal sub-strategy.
 - **Confluence Strategy (`confluence`):** Combines Bollinger Bands, RSI, MACD, Volume MA, and ATR dynamic Stop Loss/Take Profit.
 - **EMA Trend Ribbon (`ema_trend`):** Follows trends using EMA Ribbon (9, 21, 50, 200) with ADX trend intensity filter.

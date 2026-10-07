@@ -91,6 +91,51 @@ class BinanceFuturesEngine(ExecutionEngine):
         precision = d - remainder
         return format(precision, 'f').rstrip('0').rstrip('.')
 
+    async def update_stop_loss(self, symbol: str, side: str, new_sl_price: float) -> bool:
+        """
+        Cancels any existing STOP_MARKET orders for the symbol and places a new one
+        at new_sl_price formatted with tickSize precision.
+        """
+        await self._ensure_client()
+        binance_symbol = symbol.replace('/', '')
+
+        try:
+            # 1. Cancel existing stop market orders
+            open_orders = await retry_async(
+                lambda: self.client.futures_get_open_orders(symbol=binance_symbol),
+                max_retries=3
+            )
+            for o in open_orders:
+                if o['type'] == 'STOP_MARKET':
+                    await retry_async(
+                        lambda: self.client.futures_cancel_order(symbol=binance_symbol, orderId=o['orderId']),
+                        max_retries=3
+                    )
+
+            # 2. Get symbol precision filter
+            info = await self.get_symbol_info(symbol)
+            price_filter = next(f for f in info['filters'] if f['filterType'] == 'PRICE_FILTER')
+            tick_size = price_filter['tickSize']
+            formatted_sl = self._format_value(new_sl_price, tick_size)
+
+            # 3. Place new Stop Loss
+            sl_side = 'SELL' if side.upper() in ['BUY', 'LONG'] else 'BUY'
+            await retry_async(
+                lambda: self.client.futures_create_order(
+                    symbol=binance_symbol,
+                    side=sl_side,
+                    type='STOP_MARKET',
+                    stopPrice=formatted_sl,
+                    closePosition='true'
+                ),
+                max_retries=3
+            )
+            logger.info(f"✅ Stop-Loss updated to {formatted_sl} for {symbol}.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update Stop-Loss for {symbol}: {e}")
+            return False
+
     async def place_order(self, symbol: str, side: str, order_type: str, amount: float, price: Optional[float] = None, stop_loss: Optional[float] = None, take_profit: Optional[float] = None, leverage: int = 1) -> Order:
         await self._ensure_client()
         binance_symbol = symbol.replace('/', '')
