@@ -31,6 +31,7 @@ class Config:
     STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.02"))        # 2% stop loss
     TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "0.04"))    # 4% take profit
     MAX_DAILY_DRAWDOWN_PCT = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT", "0.03"))  # 3% max daily drawdown limit
+    MAX_FUNDING_RATE = float(os.getenv("MAX_FUNDING_RATE", "0.002"))  # 0.2% max funding rate threshold
 
     # Notifications & Interactive Telegram Commands
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")

@@ -64,7 +64,6 @@ class MultiSymbolTradingBot(StreamListener):
             self.notifier.send(message)
 
     def _setup_telegram_commands(self):
-        """Registers interactive commands on Telegram Provider."""
         if not self.notifier:
             return
 
@@ -76,7 +75,6 @@ class MultiSymbolTradingBot(StreamListener):
         self.notifier.start_command_listener()
 
     async def _cmd_status(self) -> str:
-        """Returns live bot status, active symbols, open positions & PnL."""
         msg = f"📊 *AutoTrade Bot Status*\n"
         msg += f"• *Symbols:* {', '.join(self.symbols)}\n"
         msg += f"• *Timeframe:* {self.timeframe}\n"
@@ -93,7 +91,6 @@ class MultiSymbolTradingBot(StreamListener):
         return msg
 
     async def _cmd_balance(self) -> str:
-        """Returns current exchange balance."""
         try:
             balances = await self.engine.get_balance()
             self.cached_balances = balances
@@ -106,7 +103,6 @@ class MultiSymbolTradingBot(StreamListener):
             return f"❌ Error fetching balance: {e}"
 
     async def _cmd_closeall(self) -> str:
-        """Emergency command to close all active open positions."""
         msg = "🚨 *Emergency Close All Initiated*\n"
         try:
             positions = await self.engine.get_positions()
@@ -217,7 +213,6 @@ class MultiSymbolTradingBot(StreamListener):
             await self.process_symbol_strategy(symbol)
 
     async def _get_throttled_balance(self) -> Dict[str, float]:
-        """Fetches account balance with REST throttling (cached for 10s)."""
         now = time.time()
         if now - self.last_balance_check >= 10.0 or not self.cached_balances:
             self.last_balance_check = now
@@ -289,7 +284,7 @@ class MultiSymbolTradingBot(StreamListener):
         except Exception as e:
             logger.error(f"Error checking position/trailing stop for {symbol}: {e}")
 
-        # Check Circuit Breaker before strategy analysis
+        # Check Circuit Breaker
         try:
             balance = await self._get_throttled_balance()
             quote_currency = symbol.split('/')[1]
@@ -336,8 +331,9 @@ class MultiSymbolTradingBot(StreamListener):
                 return
 
             funding_rate = await self.engine.get_funding_rate(symbol)
-            if (action == 'buy' and funding_rate > 0.001) or (action == 'sell' and funding_rate < -0.001):
-                logger.warning(f"Skipping trade [{symbol}] due to high funding rate: {funding_rate}")
+            max_fr = config.MAX_FUNDING_RATE
+            if (action == 'buy' and funding_rate > max_fr) or (action == 'sell' and funding_rate < -max_fr):
+                logger.warning(f"Skipping trade [{symbol}] due to high funding rate: {funding_rate:.6f} (Limit: +/-{max_fr:.6f})")
                 return
 
             sl_pct = signal.get('sl_pct', config.STOP_LOSS_PCT)
