@@ -44,9 +44,9 @@ class TradingBot(StreamListener):
     async def initialize(self):
         logger.info(f"🚀 Initializing bot for {self.symbol}...")
         try:
-            # 1. Load historical data
-            logger.info("📡 Fetching historical OHLCV data...")
-            self.ohlcv_data = await self.streamer.fetch_ohlcv(self.symbol, self.timeframe, limit=100)
+            # 1. Load historical data (300 candles to support 200 EMA & long-period indicators)
+            logger.info("📡 Fetching historical OHLCV data (300 candles)...")
+            self.ohlcv_data = await self.streamer.fetch_ohlcv(self.symbol, self.timeframe, limit=300)
 
             # 2. Set margin mode and check permissions
             logger.info("⚙️ Setting Margin Mode to ISOLATED...")
@@ -75,9 +75,9 @@ class TradingBot(StreamListener):
             return
 
         if candle['is_closed']:
-            # Append new closed candle
+            # Append new closed candle and keep last 300
             new_row = pd.DataFrame([candle])
-            self.ohlcv_data = pd.concat([self.ohlcv_data, new_row], ignore_index=True).iloc[-100:]
+            self.ohlcv_data = pd.concat([self.ohlcv_data, new_row], ignore_index=True).iloc[-300:]
             logger.info(f"🆕 Candle Closed: {candle['close']} | Vol: {candle['volume']}")
 
         await self.process_strategy()
