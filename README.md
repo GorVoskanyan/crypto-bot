@@ -1,20 +1,25 @@
 # AutoTrade-Jules: Algorithmic Trading Bot
 
 ## Project Overview
-This is a modular trading bot built in Python for Binance Futures. It automates technical analysis strategies using CCXT, WebSocket streaming, and dynamic strategy selection (Adaptive Strategy Engine).
+This is a modular trading bot built in Python for Binance Futures. It automates technical analysis strategies using CCXT, WebSocket streaming, dynamic market scanning for high-volatility coins, and dynamic strategy selection (Adaptive Strategy Engine).
 
-## Tech Stack
-- **Language:** Python 3.11+
-- **Package Manager:** `uv` (Fast Python package installer)
-- **Key Libraries:** `ccxt`, `pandas`, `pandas_ta`, `python-binance`, `pydantic`, `python-dotenv`
-- **Infrastructure:** Docker & Docker Compose support, designed to run asynchronously as a background service.
+## Key Features & Phase 1 Highlights
+- **Dynamic Market Scanner (`MarketScanner`):** Automatically scans Binance Futures markets for the Top N USDT pairs with the highest 24h volatility range and liquid volume ($10M+ USDT volume filter).
+- **Multi-Symbol Concurrency:** Runs WebSocket streams, orderbook analytics, and strategy engines concurrently for multiple top volatile crypto pairs.
+- **Adaptive Strategy Selector (`adaptive` - Default):** Dynamically analyzes market regime (trending via ADX, volatile/ranging via Bollinger Bandwidth) for each coin and delegates execution to the optimal sub-strategy.
+- **Confluence Strategy (`confluence`):** Combines Bollinger Bands, RSI, MACD, Volume MA, and ATR dynamic Stop Loss/Take Profit.
+- **EMA Trend Ribbon (`ema_trend`):** Follows trends using EMA Ribbon (9, 21, 50, 200) with ADX trend intensity filter.
+- **Scalping Strategy (`scalping`):** High-frequency scalping using RSI and orderbook imbalance.
+- **SMA Crossover (`sma`):** Golden Cross / Death Cross moving average crossover.
 
-## Strategies Available
-1. **Adaptive Strategy Selector (`adaptive` - Default):** Dynamically analyzes market regime (trending via ADX, volatile/ranging via Bollinger Bandwidth) for any coin and delegates execution to the optimal sub-strategy.
-2. **Confluence Strategy (`confluence`):** Combines Bollinger Bands, RSI, MACD, Volume MA, and ATR dynamic Stop Loss/Take Profit.
-3. **EMA Trend Ribbon (`ema_trend`):** Follows trends using EMA Ribbon (9, 21, 50, 200) with ADX trend intensity filter.
-4. **Scalping Strategy (`scalping`):** High-frequency scalping using RSI and orderbook imbalance.
-5. **SMA Crossover (`sma`):** Golden Cross / Death Cross moving average crossover.
+## Environment Configuration Variables
+Set these variables in `.env`:
+- `ENABLE_SCANNER=true` - Automatically scan and trade top volatile USDT pairs on startup.
+- `TOP_SYMBOLS_COUNT=3` - Number of top volatile coins to trade concurrently.
+- `MIN_24H_VOLUME_USDT=10000000.0` - Minimum 24h volume threshold ($10M).
+- `STRATEGY=adaptive` - Active strategy (`adaptive`, `confluence`, `ema_trend`, `scalping`, `sma`).
+- `TIMEFRAME=5m` - Candle timeframe (`1m`, `5m`, `15m`, `1h`).
+- `USE_TESTNET=true` - Set `true` for Binance Futures Testnet, `false` for Live mainnet.
 
 ## Quick Start with `uv`
 

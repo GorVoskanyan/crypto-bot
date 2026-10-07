@@ -13,23 +13,36 @@ from autotrade.config import config
 
 logger = logging.getLogger(__name__)
 
-class TradingBot(StreamListener):
-    def __init__(self, streamer: BinanceFuturesStreamer, strategy: Strategy, engine: BinanceFuturesEngine, symbol: str, timeframe: str = '1m'):
-        self.streamer = streamer
-        self.strategy = strategy
-        self.engine = engine
-        self.risk_manager = RiskManager()
+class SymbolContext:
+    def __init__(self, symbol: str):
         self.symbol = symbol
-        self.timeframe = timeframe
-
         self.ohlcv_data: pd.DataFrame = pd.DataFrame()
         self.current_orderbook: Dict[str, Any] = {}
         self.in_position = False
-
-        # Periodic logging and REST throttling timestamps
         self.last_orderbook_log = 0.0
         self.last_monitoring_log = 0.0
         self.last_pnl_log = 0.0
+
+class MultiSymbolTradingBot(StreamListener):
+    def __init__(
+        self,
+        streamer: BinanceFuturesStreamer,
+        strategy_factory: Any,
+        engine: BinanceFuturesEngine,
+        symbols: List[str],
+        timeframe: str = '5m'
+    ):
+        self.streamer = streamer
+        self.strategy_factory = strategy_factory
+        self.engine = engine
+        self.risk_manager = RiskManager()
+        self.symbols = symbols
+        self.timeframe = timeframe
+
+        # Map symbol -> SymbolContext and Strategy instance
+        self.contexts: Dict[str, SymbolContext] = {s: SymbolContext(s) for s in symbols}
+        self.strategies: Dict[str, Strategy] = {s: strategy_factory() for s in symbols}
+
         self.last_position_check = 0.0
         self.cached_positions = []
 
@@ -42,138 +55,138 @@ class TradingBot(StreamListener):
             self.notifier.send(message)
 
     async def initialize(self):
-        logger.info(f"🚀 Initializing bot for {self.symbol}...")
+        logger.info(f"🚀 Initializing Multi-Symbol Bot for {len(self.symbols)} pairs: {', '.join(self.symbols)}...")
         try:
-            # 1. Load historical data (300 candles to support 200 EMA & long-period indicators)
-            logger.info("📡 Fetching historical OHLCV data (300 candles)...")
-            self.ohlcv_data = await self.streamer.fetch_ohlcv(self.symbol, self.timeframe, limit=300)
+            for symbol in self.symbols:
+                logger.info(f"📡 Fetching historical OHLCV data for {symbol} (300 candles)...")
+                ctx = self.contexts[symbol]
+                ctx.ohlcv_data = await self.streamer.fetch_ohlcv(symbol, self.timeframe, limit=300)
 
-            # 2. Set margin mode and check permissions
-            logger.info("⚙️ Setting Margin Mode to ISOLATED...")
-            try:
-                await self.engine.set_margin_mode(self.symbol, 'ISOLATED')
-                logger.info("✅ Margin Mode set to ISOLATED.")
-            except Exception as e:
-                if "code=-2015" in str(e):
-                    logger.error("❌ CRITICAL ERROR: API Key Permissions (Code -2015)")
-                    logger.error("   Your API key is valid but does NOT have 'Enable Futures' permission.")
-                    logger.error("   Please go to Binance API Management and check the 'Enable Futures' box.")
-                    logger.error(f"   Context: Attempted to set margin mode for {self.symbol}")
-                    raise e
-                logger.warning(f"⚠️ Could not set margin mode (might be already set): {e}")
+                logger.info(f"⚙️ Setting Margin Mode for {symbol} to ISOLATED...")
+                try:
+                    await self.engine.set_margin_mode(symbol, 'ISOLATED')
+                except Exception as e:
+                    if "code=-2015" in str(e):
+                        logger.error("❌ CRITICAL ERROR: API Key Permissions (Code -2015)")
+                        raise e
+                    logger.warning(f"⚠️ Could not set margin mode for {symbol}: {e}")
 
-            # 3. Connect listener
             self.streamer.add_listener(self)
-            logger.info("🏁 Initialization complete. Starting real-time streams...")
+            logger.info("🏁 Initialization complete. Starting real-time streams for all symbols...")
 
         except Exception as e:
-            logger.error(f"💥 FATAL ERROR during initialization: {e}")
+            logger.error(f"💥 FATAL ERROR during multi-symbol initialization: {e}")
             raise e
 
     async def on_candle(self, symbol: str, timeframe: str, candle: dict):
-        if symbol != self.symbol or timeframe != self.timeframe:
+        if symbol not in self.contexts or timeframe != self.timeframe:
             return
 
+        ctx = self.contexts[symbol]
         if candle['is_closed']:
-            # Append new closed candle and keep last 300
             new_row = pd.DataFrame([candle])
-            self.ohlcv_data = pd.concat([self.ohlcv_data, new_row], ignore_index=True).iloc[-300:]
-            logger.info(f"🆕 Candle Closed: {candle['close']} | Vol: {candle['volume']}")
+            ctx.ohlcv_data = pd.concat([ctx.ohlcv_data, new_row], ignore_index=True).iloc[-300:]
+            logger.info(f"🆕 Candle Closed [{symbol}]: {candle['close']} | Vol: {candle['volume']}")
 
-        await self.process_strategy()
+        await self.process_symbol_strategy(symbol)
 
     async def on_user_data(self, data: dict):
         event_type = data.get('e')
         if event_type == 'ACCOUNT_UPDATE':
             logger.info("💰 Account updated (Balance/Position change)")
-            self.last_position_check = 0.0  # Force instant position refresh
+            self.last_position_check = 0.0
         elif event_type == 'ORDER_TRADE_UPDATE':
             trade = data['o']
             if trade['X'] == 'FILLED':
-                logger.info(f"✅ Order FILLED: {trade['S']} {trade['q']} @ {trade['p']}")
-                self.in_position = trade['S'] in ['BUY', 'SELL']
+                logger.info(f"✅ Order FILLED: {trade['s']} {trade['S']} {trade['q']} @ {trade['p']}")
                 self.last_position_check = 0.0
             elif trade['X'] == 'CANCELED':
-                 logger.info(f"❌ Order CANCELED: {trade['S']} {trade['i']}")
+                 logger.info(f"❌ Order CANCELED: {trade['s']} {trade['S']} {trade['i']}")
 
     async def on_orderbook(self, symbol: str, orderbook: dict):
-        if symbol != self.symbol:
+        if symbol not in self.contexts:
             return
-        self.current_orderbook = orderbook
+
+        ctx = self.contexts[symbol]
+        ctx.current_orderbook = orderbook
 
         now = time.time()
         best_bid = orderbook['bids'][0][0] if orderbook.get('bids') else 0
         best_ask = orderbook['asks'][0][0] if orderbook.get('asks') else 0
         spread = best_ask - best_bid
 
-        # Log market status reliably every 10 seconds
-        if now - self.last_orderbook_log >= 10.0:
-            self.last_orderbook_log = now
-            logger.info(f"📊 {self.symbol} | Bid: {best_bid} | Ask: {best_ask} | Spread: {spread:.2f}")
+        if now - ctx.last_orderbook_log >= 15.0:
+            ctx.last_orderbook_log = now
+            logger.info(f"📊 {symbol} | Bid: {best_bid} | Ask: {best_ask} | Spread: {spread:.2f}")
 
-        await self.process_strategy()
+        await self.process_symbol_strategy(symbol)
 
     async def process_strategy(self):
-        now = time.time()
+        """Processes strategy for all active symbols."""
+        for symbol in self.symbols:
+            await self.process_symbol_strategy(symbol)
 
-        # 1. Monitor Open Positions (PnL) - Throttled REST API call (every 5 seconds)
+    async def process_symbol_strategy(self, symbol: str):
+        now = time.time()
+        ctx = self.contexts[symbol]
+        strategy = self.strategies[symbol]
+
+        # 1. Position Check
         try:
             if now - self.last_position_check >= 5.0:
                 self.last_position_check = now
                 self.cached_positions = await self.engine.get_positions()
 
-            symbol_no_slash = self.symbol.replace('/', '')
+            symbol_no_slash = symbol.replace('/', '')
             active_pos = next((p for p in self.cached_positions if p['symbol'] == symbol_no_slash), None)
 
             if active_pos:
-                self.in_position = True
+                ctx.in_position = True
                 pnl = active_pos['unrealized_pnl']
-                if now - self.last_pnl_log >= 10.0:
-                    self.last_pnl_log = now
-                    logger.info(f"💰 Position: {active_pos['amount']} @ {active_pos['entry_price']} | Unrealized PnL: {pnl:.2f} USDT")
+                if now - ctx.last_pnl_log >= 15.0:
+                    ctx.last_pnl_log = now
+                    logger.info(f"💰 Position [{symbol}]: {active_pos['amount']} @ {active_pos['entry_price']} | PnL: {pnl:.2f} USDT")
                 return
             else:
-                if self.in_position:
-                    logger.info("ℹ️ Position closed.")
-                    self.in_position = False
+                if ctx.in_position:
+                    logger.info(f"ℹ️ Position closed [{symbol}].")
+                    ctx.in_position = False
         except Exception as e:
-            logger.error(f"Error checking positions: {e}")
+            logger.error(f"Error checking position for {symbol}: {e}")
 
         # 2. Strategy Analysis
-        signal = await self.strategy.analyze(self.ohlcv_data, self.current_orderbook)
+        signal = await strategy.analyze(ctx.ohlcv_data, ctx.current_orderbook)
         action = signal.get('action')
 
         if action in ['buy', 'sell']:
-            logger.info(f"🎯 Strategy Signal: {action.upper()} @ {signal['price']}")
-            await self.execute_trade(signal)
+            logger.info(f"🎯 Strategy Signal [{symbol}]: {action.upper()} @ {signal['price']}")
+            await self.execute_trade(symbol, signal)
         else:
-            # Log monitoring status every 15 seconds reliably
-            if now - self.last_monitoring_log >= 15.0:
-                self.last_monitoring_log = now
+            if now - ctx.last_monitoring_log >= 20.0:
+                ctx.last_monitoring_log = now
                 reason = signal.get('reason', 'no entry signal')
-                last_price = self.ohlcv_data.iloc[-1]['close'] if not self.ohlcv_data.empty else 'N/A'
-                logger.info(f"💤 Monitoring {self.symbol} @ {last_price} | {reason}")
+                last_price = ctx.ohlcv_data.iloc[-1]['close'] if not ctx.ohlcv_data.empty else 'N/A'
+                logger.info(f"💤 Monitoring {symbol} @ {last_price} | {reason}")
 
-    async def execute_trade(self, signal: Dict[str, Any]):
+    async def execute_trade(self, symbol: str, signal: Dict[str, Any]):
         action = signal['action']
         price = signal['price']
+        ctx = self.contexts[symbol]
 
-        # 1. Check funding rate
         try:
-            funding_rate = await self.engine.get_funding_rate(self.symbol)
+            funding_rate = await self.engine.get_funding_rate(symbol)
             if (action == 'buy' and funding_rate > 0.001) or (action == 'sell' and funding_rate < -0.001):
-                logger.warning(f"Skipping trade due to high funding rate: {funding_rate}")
+                logger.warning(f"Skipping trade [{symbol}] due to high funding rate: {funding_rate}")
                 return
         except Exception as e:
-            logger.warning(f"Could not fetch funding rate: {e}")
+            logger.warning(f"Could not fetch funding rate for {symbol}: {e}")
 
-        # 2. Risk Management
         try:
             balance = await self.engine.get_balance()
-            quote_currency = self.symbol.split('/')[1]
+            quote_currency = symbol.split('/')[1]
 
-            if balance.get(quote_currency, 0) < 10: # Min $10
-                logger.warning("Insufficient balance")
+            if balance.get(quote_currency, 0) < 10:
+                logger.warning(f"Insufficient balance to execute trade for {symbol}")
                 return
 
             sl_pct = signal.get('sl_pct', config.STOP_LOSS_PCT)
@@ -183,15 +196,14 @@ class TradingBot(StreamListener):
             tp_price = price * (1 + tp_pct) if action == 'buy' else price * (1 - tp_pct)
 
             leverage = self.risk_manager.calculate_dynamic_leverage(price, sl_price)
-            amount = self.risk_manager.calculate_quantity(signal, balance, self.symbol, leverage)
+            amount = self.risk_manager.calculate_quantity(signal, balance, symbol, leverage)
 
             if amount <= 0:
-                logger.warning("Calculated amount is 0")
+                logger.warning(f"Calculated amount is 0 for {symbol}")
                 return
 
-            # 3. Execution
             order = await self.engine.place_order(
-                symbol=self.symbol,
+                symbol=symbol,
                 side=action,
                 order_type='MARKET',
                 amount=amount,
@@ -199,26 +211,62 @@ class TradingBot(StreamListener):
                 take_profit=tp_price,
                 leverage=leverage
             )
-            self.in_position = True
-            self.last_position_check = 0.0  # Reset position timer to update immediately
-            msg = f"🚀 {action.upper()} {amount} {self.symbol} @ {price}\nLev: {leverage}x, SL: {sl_price:.2f}, TP: {tp_price:.2f}"
+            ctx.in_position = True
+            self.last_position_check = 0.0
+            msg = f"🚀 {action.upper()} {amount} {symbol} @ {price}\nLev: {leverage}x, SL: {sl_price:.2f}, TP: {tp_price:.2f}"
             logger.info(msg)
             self._notify(msg)
         except Exception as e:
-            logger.error(f"Trade execution failed: {e}")
-            self._notify(f"❌ Error: {e}")
+            logger.error(f"Trade execution failed for {symbol}: {e}")
+            self._notify(f"❌ Error [{symbol}]: {e}")
 
     async def _heartbeat_loop(self):
-        """Guarantees periodic console activity every 15s even if WebSocket ticks are quiet."""
         while True:
             await asyncio.sleep(15)
             await self.process_strategy()
 
     async def run(self):
         await self.initialize()
-        await asyncio.gather(
-            self.streamer.start_kline_socket(self.symbol, self.timeframe),
-            self.streamer.start_orderbook_socket(self.symbol),
-            self.streamer.start_user_socket(),
-            self._heartbeat_loop()
+
+        tasks = [self.streamer.start_user_socket(), self._heartbeat_loop()]
+        for symbol in self.symbols:
+            tasks.append(self.streamer.start_kline_socket(symbol, self.timeframe))
+            tasks.append(self.streamer.start_orderbook_socket(symbol))
+
+        await asyncio.gather(*tasks)
+
+class TradingBot(MultiSymbolTradingBot):
+    def __init__(self, streamer: BinanceFuturesStreamer, strategy: Strategy, engine: BinanceFuturesEngine, symbol: str, timeframe: str = '1m'):
+        super().__init__(
+            streamer=streamer,
+            strategy_factory=lambda: strategy,
+            engine=engine,
+            symbols=[symbol],
+            timeframe=timeframe
         )
+        self.symbol = symbol
+        self.strategy = strategy
+
+    @property
+    def ohlcv_data(self):
+        return self.contexts[self.symbol].ohlcv_data
+
+    @ohlcv_data.setter
+    def ohlcv_data(self, df):
+        self.contexts[self.symbol].ohlcv_data = df
+
+    @property
+    def current_orderbook(self):
+        return self.contexts[self.symbol].current_orderbook
+
+    @current_orderbook.setter
+    def current_orderbook(self, ob):
+        self.contexts[self.symbol].current_orderbook = ob
+
+    @property
+    def in_position(self):
+        return self.contexts[self.symbol].in_position
+
+    @in_position.setter
+    def in_position(self, val):
+        self.contexts[self.symbol].in_position = val
