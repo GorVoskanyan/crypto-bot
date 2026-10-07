@@ -33,15 +33,21 @@ class BinanceFuturesEngine(ExecutionEngine):
     async def set_margin_mode(self, symbol: str, margin_mode: str):
         await self._ensure_client()
         binance_symbol = symbol.replace('/', '')
-        try:
-            return await retry_async(
-                lambda: self.client.futures_change_margin_type(symbol=binance_symbol, marginType=margin_mode.upper()),
-                max_retries=3
-            )
-        except Exception as e:
-            if "No need to change margin type" in str(e):
-                return None
-            raise e
+
+        async def _change_margin():
+            try:
+                return await self.client.futures_change_margin_type(
+                    symbol=binance_symbol,
+                    marginType=margin_mode.upper()
+                )
+            except Exception as e:
+                err_str = str(e)
+                if "No need to change margin type" in err_str or "-4046" in err_str:
+                    logger.info(f"Margin mode already set to {margin_mode.upper()} for {symbol}.")
+                    return None
+                raise e
+
+        return await retry_async(_change_margin, max_retries=3)
 
     async def get_balance(self) -> Dict[str, float]:
         await self._ensure_client()
