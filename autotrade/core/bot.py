@@ -103,6 +103,7 @@ class MultiSymbolTradingBot(StreamListener):
             return f"❌ Error fetching balance: {e}"
 
     async def _cmd_closeall(self) -> str:
+        """Emergency command to close all active open positions using reduceOnly market orders."""
         msg = "🚨 *Emergency Close All Initiated*\n"
         try:
             positions = await self.engine.get_positions()
@@ -110,20 +111,45 @@ class MultiSymbolTradingBot(StreamListener):
                 return "ℹ️ No open positions to close."
 
             for p in positions:
-                symbol = p['symbol']
+                raw_symbol = p['symbol']
                 amt = abs(p['amount'])
-                side = 'SELL' if p['amount'] > 0 else 'BUY'
+                close_side = 'SELL' if p['amount'] > 0 else 'BUY'
 
-                formatted_symbol = f"{symbol[:-4]}/USDT" if symbol.endswith('USDT') else symbol
-                await self.engine.place_order(
-                    symbol=formatted_symbol,
-                    side=side,
-                    order_type='MARKET',
-                    amount=amt
+                formatted_symbol = f"{raw_symbol[:-4]}/USDT" if raw_symbol.endswith('USDT') else raw_symbol
+
+                # 1. Cancel all open orders for symbol
+                try:
+                    await self.engine.client.futures_cancel_all_open_orders(symbol=raw_symbol)
+                except Exception as ce:
+                    logger.warning(f"Could not cancel open orders for {raw_symbol}: {ce}")
+
+                # 2. Get symbol step size precision
+                info = await self.engine.get_symbol_info(formatted_symbol)
+                lot_size = next(f for f in info['filters'] if f['filterType'] == 'LOT_SIZE')
+                step_size = lot_size['stepSize']
+                formatted_qty = self.engine._format_value(amt, step_size)
+
+                # 3. Place MARKET order with reduceOnly=True (no leverage modification)
+                await self.engine.client.futures_create_order(
+                    symbol=raw_symbol,
+                    side=close_side,
+                    type='MARKET',
+                    quantity=formatted_qty,
+                    reduceOnly='true'
                 )
-                msg += f"✅ Closed position for `{symbol}` ({amt} units)\n"
+
+                if formatted_symbol in self.contexts:
+                    ctx = self.contexts[formatted_symbol]
+                    ctx.in_position = False
+                    ctx.entry_price = 0.0
+
+                msg += f"✅ Closed position for `{raw_symbol}` ({formatted_qty} units)\n"
+
+            self.last_position_check = 0.0
+            self.last_balance_check = 0.0
             return msg
         except Exception as e:
+            logger.error(f"Emergency close failed: {e}")
             return f"💥 Emergency close failed: {e}"
 
     async def _cmd_topcoins(self) -> str:

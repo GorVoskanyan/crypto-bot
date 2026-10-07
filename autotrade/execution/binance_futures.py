@@ -25,10 +25,18 @@ class BinanceFuturesEngine(ExecutionEngine):
     async def set_leverage(self, symbol: str, leverage: int):
         await self._ensure_client()
         binance_symbol = symbol.replace('/', '')
-        return await retry_async(
-            lambda: self.client.futures_change_leverage(symbol=binance_symbol, leverage=leverage),
-            max_retries=3
-        )
+
+        async def _change_leverage():
+            try:
+                return await self.client.futures_change_leverage(symbol=binance_symbol, leverage=leverage)
+            except Exception as e:
+                err_str = str(e)
+                if "-4161" in err_str or "Leverage reduction is not supported" in err_str:
+                    logger.info(f"Leverage change skipped for {symbol} due to existing open position.")
+                    return None
+                raise e
+
+        return await retry_async(_change_leverage, max_retries=3)
 
     async def set_margin_mode(self, symbol: str, margin_mode: str):
         await self._ensure_client()
@@ -89,13 +97,12 @@ class BinanceFuturesEngine(ExecutionEngine):
         step = decimal.Decimal(step_size)
         remainder = d % step
         precision = d - remainder
-        return format(precision, 'f').rstrip('0').rstrip('.')
+        formatted_str = format(precision, 'f')
+        if '.' in formatted_str:
+            formatted_str = formatted_str.rstrip('0').rstrip('.')
+        return formatted_str
 
     async def update_stop_loss(self, symbol: str, side: str, new_sl_price: float) -> bool:
-        """
-        Cancels any existing STOP_MARKET orders for the symbol and places a new one
-        at new_sl_price formatted with tickSize precision.
-        """
         await self._ensure_client()
         binance_symbol = symbol.replace('/', '')
 
@@ -183,7 +190,6 @@ class BinanceFuturesEngine(ExecutionEngine):
             timestamp=datetime.fromtimestamp(res['updateTime'] / 1000.0)
         )
 
-        # Allow position update to settle on exchange before submitting SL/TP
         if stop_loss or take_profit:
             import asyncio
             await asyncio.sleep(0.5)
