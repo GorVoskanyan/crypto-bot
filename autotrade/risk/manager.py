@@ -12,7 +12,7 @@ class RiskManager:
     def __init__(
         self,
         risk_percent_per_trade: float = 0.01,
-        max_leverage: int = 20,
+        max_leverage: int = 10,
         breakeven_trigger_pct: float = 0.01,   # Activate Break-Even at +1% profit
         trailing_stop_pct: float = 0.008,      # Trail Stop-Loss by 0.8% behind peak price
         stop_loss_pct: float = 0.02,
@@ -34,7 +34,7 @@ class RiskManager:
         self.circuit_breaker_tripped = False
 
     def reset_daily_stats_if_new_day(self, current_total_balance: float):
-        """Resets daily starting balance and circuit breaker when a new UTC day begins."""
+        """Resets daily starting balance and circuit breaker when a new UTC day begins or if balance recovers."""
         today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         if today_str != self.current_day_str or self.day_start_balance == 0.0:
             self.current_day_str = today_str
@@ -51,6 +51,8 @@ class RiskManager:
             drawdown_pct = (self.day_start_balance - current_total_balance) / self.day_start_balance
             if drawdown_pct >= self.max_daily_drawdown_pct:
                 self.circuit_breaker_tripped = True
+            elif drawdown_pct < self.max_daily_drawdown_pct:
+                self.circuit_breaker_tripped = False
 
     def is_circuit_breaker_active(self, current_total_balance: float) -> bool:
         """Returns True if daily drawdown threshold has been hit."""
@@ -59,6 +61,8 @@ class RiskManager:
             drawdown_pct = (self.day_start_balance - current_total_balance) / self.day_start_balance
             if drawdown_pct >= self.max_daily_drawdown_pct:
                 self.circuit_breaker_tripped = True
+            elif drawdown_pct < self.max_daily_drawdown_pct:
+                self.circuit_breaker_tripped = False
         return self.circuit_breaker_tripped
 
     def check_trade_permission(self, signal: Dict[str, Any], balance: Dict[str, float], symbol: str) -> bool:
@@ -98,7 +102,6 @@ class RiskManager:
 
         quantity = risk_amount / sl_dist
 
-        # Cap quantity by available balance * leverage
         max_notional = available_balance * leverage
         max_quantity = max_notional / price
 

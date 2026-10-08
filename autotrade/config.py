@@ -28,6 +28,7 @@ class Config:
 
     # Risk Management & Protection Limits
     RISK_PERCENT_PER_TRADE = float(os.getenv("RISK_PERCENT_PER_TRADE", "0.01"))  # 1% risk per trade
+    MAX_LEVERAGE = int(os.getenv("MAX_LEVERAGE", "10"))              # 10x max leverage
     STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.02"))        # 2% stop loss
     TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "0.04"))    # 4% take profit
     MAX_DAILY_DRAWDOWN_PCT = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT", "0.03"))  # 3% max daily drawdown limit

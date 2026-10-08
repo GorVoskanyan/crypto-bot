@@ -41,7 +41,13 @@ class MultiSymbolTradingBot(StreamListener):
         self.streamer = streamer
         self.strategy_factory = strategy_factory
         self.engine = engine
-        self.risk_manager = RiskManager()
+        self.risk_manager = RiskManager(
+            risk_percent_per_trade=config.RISK_PERCENT_PER_TRADE,
+            max_leverage=config.MAX_LEVERAGE,
+            stop_loss_pct=config.STOP_LOSS_PCT,
+            take_profit_pct=config.TAKE_PROFIT_PCT,
+            max_daily_drawdown_pct=config.MAX_DAILY_DRAWDOWN_PCT
+        )
         self.symbols = symbols
         self.timeframe = timeframe
 
@@ -78,6 +84,7 @@ class MultiSymbolTradingBot(StreamListener):
         msg = f"📊 *AutoTrade Bot Status*\n"
         msg += f"• *Symbols:* {', '.join(self.symbols)}\n"
         msg += f"• *Timeframe:* {self.timeframe}\n"
+        msg += f"• *Max Leverage:* {config.MAX_LEVERAGE}x\n"
         msg += f"• *Circuit Breaker:* {'🔴 TRIPPED' if self.risk_manager.circuit_breaker_tripped else '🟢 OK'}\n\n"
 
         positions = await self.engine.get_positions()
@@ -117,19 +124,16 @@ class MultiSymbolTradingBot(StreamListener):
 
                 formatted_symbol = f"{raw_symbol[:-4]}/USDT" if raw_symbol.endswith('USDT') else raw_symbol
 
-                # 1. Cancel all open orders for symbol
                 try:
                     await self.engine.client.futures_cancel_all_open_orders(symbol=raw_symbol)
                 except Exception as ce:
                     logger.warning(f"Could not cancel open orders for {raw_symbol}: {ce}")
 
-                # 2. Get symbol step size precision
                 info = await self.engine.get_symbol_info(formatted_symbol)
                 lot_size = next(f for f in info['filters'] if f['filterType'] == 'LOT_SIZE')
                 step_size = lot_size['stepSize']
                 formatted_qty = self.engine._format_value(amt, step_size)
 
-                # 3. Place MARKET order with reduceOnly=True (no leverage modification)
                 await self.engine.client.futures_create_order(
                     symbol=raw_symbol,
                     side=close_side,
